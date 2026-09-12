@@ -75,17 +75,17 @@ if command -v rsync >/dev/null 2>&1; then
 else
   echo "rsync が無いためインストールします..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq rsync openssh-client
+    apt-get update -qq && apt-get install -y -qq rsync openssh-client sshpass
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y rsync openssh-clients
+    dnf install -y rsync openssh-clients sshpass
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y rsync openssh-clients
+    yum install -y rsync openssh-clients sshpass
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache rsync openssh-client
+    apk add --no-cache rsync openssh-client sshpass
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm rsync openssh
+    pacman -Sy --noconfirm rsync openssh sshpass
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install rsync openssh
+    zypper --non-interactive install rsync openssh sshpass
   else
     echo "警告: 対応するパッケージマネージャが見つかりません。" >&2
     echo "  手動で rsync を導入してください" >&2

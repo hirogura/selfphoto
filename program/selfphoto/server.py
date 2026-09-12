@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.2.1"
+    server_version = "selfphoto/0.2.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1131,9 +1131,11 @@ class Handler(BaseHTTPRequestHandler):
         ssh = self._backup_ssh_from_body(body)
         r = backup.test_ssh_connection(ssh)
         if r.get("ok"):
-            self.send_json({"ok": True, "message": r.get("message", "SSH接続OK")})
+            self.send_json({"ok": True, "message": r.get("message", "SSH接続OK"),
+                            "diagnostics": r.get("diagnostics")})
         else:
-            self.send_json({"ok": False, "error": r.get("error", "ssh failed")}, 400)
+            self.send_json({"ok": False, "error": r.get("error", "ssh failed"),
+                            "diagnostics": r.get("diagnostics")}, 400)
 
     def api_backup_target_check(self) -> None:
         """ターゲットフォルダの確認。無い場合は作成する（mkdir -p）。"""
@@ -1711,6 +1713,7 @@ function renderBackup() {
         <label>パスワード<input id="bk-ssh-pw" type="password" placeholder="変更しない場合は空欄"></label>
       </div>
       <div class="bk-row"><button id="bk-ssh-test" type="button">接続確認</button><button id="bk-ssh-save" type="button">設定保存</button><span id="bk-ssh-msg" class="bk-msg"></span></div>
+      <div class="bk-desc" id="bk-ssh-diag"></div>
       <div class="bk-desc">接続エラーとコピーエラーの切り分け用。先に「接続確認」でSSH疎通を確かめられます。</div>
     </fieldset>
     <fieldset><legend>監視（自動実行）</legend>
@@ -1794,6 +1797,8 @@ function setBkMsg(id, ok, text) {
 async function testSshConnection() {
   const body = backupFormValues();
   setBkMsg('bk-ssh-msg', true, '確認中…');
+  const diagEl = document.getElementById('bk-ssh-diag');
+  if (diagEl) diagEl.textContent = '';
   try {
     const r = await fetch('/api/backup-ssh-test', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1802,6 +1807,14 @@ async function testSshConnection() {
     const j = await r.json();
     if (j.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));
     else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
+    const d = j.diagnostics;
+    if (d && diagEl) {
+      const keyTxt = (d.key && d.key.specified)
+        ? `鍵ファイル: ${d.key.path} (${d.key.exists ? (d.key.readable ? 'あり・読める' : 'あり・読めない') : 'なし'})`
+        : `鍵ファイル: 未指定 (サーバー既定の鍵: ${(d.defaultKeys || []).join(', ') || 'なし'})`;
+      diagEl.textContent =
+        `診断: 実行ユーザー=${d.runUser} / sshpass=${d.sshpassAvailable ? 'あり' : 'なし'} / ${keyTxt}`;
+    }
   } catch (err) {
     setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
   }

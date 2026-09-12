@@ -210,6 +210,79 @@ def parse_remote_path(tgt: str, ssh: dict) -> str:
     return t
 
 
+def ssh_diagnostics(ssh: dict) -> dict:
+    """接続確認用の診断情報（パスワード自体は含めない）。
+
+    ターミナルでは繋がるのにUIでは失敗する原因の多くは、
+    「サーバープロセス(root)とターミナルのユーザーが別で、
+    鍵・~/.ssh/config・ssh-agentを共有していない」ことにある。
+    その切り分け用に実行ユーザー・鍵・sshpassの状態を返す。
+    """
+    import getpass
+    ssh = ssh or {}
+    try:
+        run_user = getpass.getuser()
+    except Exception:
+        run_user = f"uid={os.geteuid()}"
+    home = os.path.expanduser("~")
+    key = ((ssh.get("key") or "").strip())
+    key_info: dict = {"specified": bool(key)}
+    if key:
+        kp = Path(key)
+        key_info.update({
+            "path": key,
+            "exists": kp.is_file(),
+            "readable": os.access(key, os.R_OK),
+        })
+    # 鍵ファイル未指定時は ssh が使うデフォルト鍵の有無を見る
+    default_keys = []
+    for name in ("id_ed25519", "id_ecdsa", "id_rsa"):
+        p = Path(home) / ".ssh" / name
+        try:
+            if p.is_file():
+                default_keys.append(name)
+        except OSError:
+            pass
+    return {
+        "runUser": run_user,
+        "home": home,
+        "sshpassAvailable": shutil.which("sshpass") is not None,
+        "passwordSet": bool(ssh.get("password")),
+        "key": key_info,
+        "defaultKeys": default_keys,
+    }
+
+
+def _ssh_auth_hint(ssh: dict, diag: dict) -> str:
+    """Permission denied 系のときの対処ヒント（日本語）。"""
+    hints = []
+    if diag.get("passwordSet") and not diag.get("sshpassAvailable"):
+        hints.append(
+            "パスワードが入力されていますが、サーバーに sshpass が無いため"
+            "パスワード認証に使われていません"
+            "(apt install sshpass が必要)。")
+    key = diag.get("key") or {}
+    if key.get("specified"):
+        if not key.get("exists"):
+            hints.append(
+                f"鍵ファイル {key.get('path')} がサーバー上に存在しません"
+                "(サーバーから見える絶対パスを指定してください)。")
+        elif not key.get("readable"):
+            hints.append(
+                f"鍵ファイル {key.get('path')} が読み取れません(パーミッションを確認)。")
+    elif not diag.get("defaultKeys"):
+        hints.append(
+            f"サーバー実行ユーザー({diag.get('runUser')})の {diag.get('home')}/.ssh に"
+            "秘密鍵が無く、鍵ファイルも未指定です。"
+            "ターミナルの鍵は別ユーザーのものなのでサーバーからは見えません。"
+            "鍵認証ならサーバー用の鍵を作って転送先に登録するか、"
+            "鍵ファイルに絶対パスを指定してください。")
+    if not hints:
+        hints.append(
+            "転送先の authorized_keys(公開鍵の登録)・ユーザー名・パスワードを確認してください。")
+    return " ".join(hints)
+
+
 def test_ssh_connection(ssh: dict) -> dict:
     """SSH 接続だけ確認する。成功なら {"ok": True}、失敗なら理由付きで返す。"""
     host = ((ssh or {}).get("host") or "").strip()
@@ -217,6 +290,16 @@ def test_ssh_connection(ssh: dict) -> dict:
         return {"ok": False, "error": "ssh host required"}
     if shutil.which("ssh") is None:
         return {"ok": False, "error": "ssh not found"}
+    diag = ssh_diagnostics(ssh)
+    # パスワードがあるのに sshpass が無い場合は認証前に明示する
+    # (無いとパスワードが無視されて Permission denied になるため)。
+    if diag.get("passwordSet") and not diag.get("sshpassAvailable"):
+        return {"ok": False,
+                "error": ("パスワード認証できません: "
+                          "パスワードが入力されていますが、サーバーに sshpass が"
+                          "インストールされていないため無視されます。"
+                          "apt install sshpass で導入するか、鍵認証を使ってください。"),
+                "diagnostics": diag}
     dest = _ssh_dest(ssh)
     argv = _ssh_prefix(ssh) + _ssh_base_args(ssh) + [dest, "echo", "ok"]
     env = dict(os.environ)
@@ -225,15 +308,20 @@ def test_ssh_connection(ssh: dict) -> dict:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=SSH_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "ssh connection timed out"}
+        return {"ok": False, "error": "ssh connection timed out",
+                "diagnostics": diag}
     except FileNotFoundError:
-        return {"ok": False, "error": "ssh not found"}
+        return {"ok": False, "error": "ssh not found", "diagnostics": diag}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "diagnostics": diag}
     if proc.returncode == 0 and proc.stdout.strip().endswith("ok"):
-        return {"ok": True, "message": "SSH接続OK"}
+        return {"ok": True, "message": "SSH接続OK", "diagnostics": diag}
     log = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return {"ok": False, "error": f"ssh connection failed (exit {proc.returncode}): {log[:2000]}"}
+    err = f"ssh connection failed (exit {proc.returncode}): {log[:2000]}"
+    # 認証失敗なら対処ヒントを付ける（接続エラーなのか設定ミスなのか分かるように）
+    if proc.returncode == 255 or "Permission denied" in log:
+        err += " [ヒント: " + _ssh_auth_hint(ssh, diag) + "]"
+    return {"ok": False, "error": err, "diagnostics": diag}
 
 
 def check_target(target: str, ssh: dict | None = None, create: bool = True) -> dict:
