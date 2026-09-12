@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.9"
+    server_version = "selfphoto/1.0.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -416,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_search(parsed.query)
         elif path.startswith("/thumb/"):
             self.serve_thumb(path[len("/thumb/"):])
+        elif path.startswith("/view/"):
+            self.serve_view(path[len("/view/"):])
         elif path.startswith("/editthumb/"):
             self.serve_editthumb(path[len("/editthumb/"):])
         elif path.startswith("/editphoto/"):
@@ -554,6 +556,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_photos(self, query: str) -> None:
         from urllib.parse import parse_qs
 
+        from . import ingest
+
         q = parse_qs(query)
         limit = min(int(q.get("limit", ["500"])[0]), 2000)
         offset = max(int(q.get("offset", ["0"])[0]), 0)
@@ -579,6 +583,9 @@ class Handler(BaseHTTPRequestHandler):
             thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp?v={v}" if r["thumb_done"] == 1 else None
             if base_url:
                 thumb = base_url + thumb if thumb else None
+            # ビューア用プレビュー（長辺1280px）。動画は対象外。
+            # ファイルが無くても serve 時に遅延生成されるため URL は付与する。
+            view = f"/view/{ingest.view_rel_path(rel)}?v={v}" if not r["is_video"] else None
             photos.append({
                 "id": r["id"],
                 "path": rel,
@@ -591,12 +598,15 @@ class Handler(BaseHTTPRequestHandler):
                 "camera": r["camera"],
                 "size": r["size"],
                 "thumb": thumb,
+                "view": view,
                 "original": f"/photo/{rel}?v={v}",
             })
         self.send_json({"photos": photos, "count": len(photos)})
 
     def api_search(self, query: str) -> None:
         from urllib.parse import parse_qs
+
+        from . import ingest
 
         q = parse_qs(query)
         term = (q.get("q", [""])[0] or "").strip()
@@ -619,11 +629,13 @@ class Handler(BaseHTTPRequestHandler):
             rel = r["path"]
             v = int(r["mtime"] or 0)
             thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp?v={v}" if r["thumb_done"] == 1 else None
+            view = f"/view/{ingest.view_rel_path(rel)}?v={v}" if not r["is_video"] else None
             photos.append({
                 "id": r["id"], "path": rel, "filename": r["filename"],
                 "capturedAt": r["captured_at"], "capturedLocal": r["captured_local"],
                 "isVideo": bool(r["is_video"]), "width": r["width"], "height": r["height"],
                 "camera": r["camera"], "size": r["size"], "thumb": thumb,
+                "view": view,
                 "original": f"/photo/{rel}?v={v}",
             })
         self.send_json({"photos": photos, "count": len(photos)})
@@ -660,6 +672,39 @@ class Handler(BaseHTTPRequestHandler):
         p = safe_join(common.PHOTO_DIR, rel)
         if p is None or not p.is_file():
             self.send_json({"error": "photo not found"}, 404)
+            return
+        self.send_file(p)
+
+    def _ensure_view(self, rel: str):
+        """ビューア用プレビュー画像を用意する（VIEW_DIR 配下にキャッシュ）。
+
+        無い・または元画像より古い場合はその場で生成する。
+        動画・生成失敗時は None（呼び出し側はオリジナルにフォールバック）。
+        """
+        from . import ingest
+
+        src = safe_join(common.PHOTO_DIR, rel)
+        if src is None or not src.is_file():
+            return None
+        if src.suffix.lower() in common.VIDEO_EXTS:
+            return None
+        dst_rel = ingest.view_rel_path(rel)
+        dst = safe_join(common.VIEW_DIR, dst_rel)
+        if dst is None:
+            return None
+        try:
+            if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
+                return dst
+        except OSError:
+            pass
+        if ingest.make_view_image(src, dst):
+            return dst
+        return None
+
+    def serve_view(self, rel: str) -> None:
+        p = self._ensure_view(unquote(rel))
+        if p is None:
+            self.send_json({"error": "view not found"}, 404)
             return
         self.send_file(p)
 
@@ -749,6 +794,9 @@ class Handler(BaseHTTPRequestHandler):
             # サムネイル（api_photos と同じ命名則: 元拡張子を除去 + _thumb.webp）
             thumb_rel = Path(rel).with_suffix("").as_posix() + "_thumb.webp"
             thumb = safe_join(common.THUMB_DIR, thumb_rel)
+            # ビューア用プレビュー（ingest.view_rel_path と同じ命名則）
+            view_rel = Path(rel).with_suffix("").as_posix() + "_view.webp"
+            view = safe_join(common.VIEW_DIR, view_rel)
             try:
                 if src.is_file():
                     touched_dirs.add(src.parent)
@@ -756,13 +804,17 @@ class Handler(BaseHTTPRequestHandler):
                 if thumb is not None and thumb.is_file():
                     touched_dirs.add(thumb.parent)
                     thumb.unlink()
+                if view is not None and view.is_file():
+                    touched_dirs.add(view.parent)
+                    view.unlink()
                 conn.execute("DELETE FROM photos WHERE path = ?", (rel,))
                 deleted.append(rel)
             except Exception as e:  # noqa: BLE001
                 errors.append({"path": rel, "error": str(e)})
         conn.commit()
-        # 空になったフォルダを親方向へ掃除する（写真・サムネイル両側、データルート直下まで）
-        for root in (common.PHOTO_DIR.resolve(), common.THUMB_DIR.resolve()):
+        # 空になったフォルダを親方向へ掃除する（写真・サムネイル・プレビュー各側、データルート直下まで）
+        for root in (common.PHOTO_DIR.resolve(), common.THUMB_DIR.resolve(),
+                     common.VIEW_DIR.resolve()):
             for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
                 try:
                     dp = d.resolve()
@@ -1025,6 +1077,14 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if row:
                 ingest.make_thumbnail(row)
+            # 古いビューア用プレビューは消す（次回表示時に遅延生成される）
+            stale_view = safe_join(
+                common.VIEW_DIR, Path(rel).with_suffix("").as_posix() + "_view.webp")
+            try:
+                if stale_view is not None and stale_view.is_file():
+                    stale_view.unlink()
+            except OSError:
+                pass
             try:
                 from . import backup
                 backup.mark_dirty()
@@ -1126,6 +1186,15 @@ class Handler(BaseHTTPRequestHandler):
                         and old_thumb.is_file() and not new_thumb.exists()):
                     new_thumb.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(old_thumb, new_thumb)
+            # ビューア用プレビューも追従（無ければ表示時に作り直される）
+            old_view_rel = Path(rel).with_suffix("").as_posix() + "_view.webp"
+            new_view_rel = Path(new_rel).with_suffix("").as_posix() + "_view.webp"
+            old_view = safe_join(common.VIEW_DIR, old_view_rel)
+            new_view = safe_join(common.VIEW_DIR, new_view_rel)
+            if (old_view is not None and new_view is not None
+                    and old_view.is_file() and not new_view.exists()):
+                new_view.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(old_view, new_view)
             conn.execute("UPDATE photos SET path=?, filename=?, thumb_path=? WHERE path=?",
                          (new_rel, new_name, new_thumb_rel, rel))
             conn.commit()
@@ -2763,9 +2832,21 @@ function showLb() {
   } else {
     el = document.createElement('img');
     el.className = 'fit';
+    // まず軽量プレビュー（長辺1280px）を表示する。拡大操作でオリジナルに切替。
+    // 編集・コピー・ダウンロードは従来どおり p.original を使う。
+    el.dataset.preview = p.view || '';
+    el.dataset.full = p.original;
+    el.dataset.isFull = (p.view && p.view !== p.original) ? '0' : '1';
     el.onload = () => applyLbZoom();
+    el.onerror = () => {
+      // プレビュー生成失敗時（HEIC等）はオリジナルにフォールバック
+      if (el.dataset.isFull === '0') {
+        el.dataset.isFull = '1';
+        el.src = el.dataset.full;
+      }
+    };
     el.ondblclick = () => toggleLbZoom();
-    el.src = p.original;
+    el.src = el.dataset.isFull === '0' ? el.dataset.preview : el.dataset.full;
   }
   lbContent.appendChild(el);
   document.getElementById('lb-title').textContent =
@@ -2815,10 +2896,23 @@ function stepLbZoom(dir) {
 }
 function toggleLbZoom() {
   if (!lbContent.querySelector('img')) return;
-  lbZoomIdx = (lbZoomIdx === LB_ZOOM_FIT) ? LB_ZOOM_FIT + 2 : LB_ZOOM_FIT;
+  const toZoom = (lbZoomIdx === LB_ZOOM_FIT);
+  lbZoomIdx = toZoom ? LB_ZOOM_FIT + 2 : LB_ZOOM_FIT;
+  if (toZoom) upgradeLbToOriginal();
   applyLbZoom();
 }
-document.getElementById('lb-zoom-in').onclick = (e) => { e.stopPropagation(); stepLbZoom(1); };
+// プレビュー表示中ならオリジナル画像に切り替える（拡大時の高画質化）。
+// lbBaseW（ズーム基準幅）は維持する。切り替え後の onload → applyLbZoom で
+// 同じ基準幅から再計算されるため、表示サイズが跳ねない。
+function upgradeLbToOriginal() {
+  const img = lbContent.querySelector('img');
+  if (!img || img.dataset.isFull === '1') return false;
+  img.dataset.isFull = '1';
+  flashLbTitle('高画質読み込み中…');
+  img.src = img.dataset.full;
+  return true;
+}
+document.getElementById('lb-zoom-in').onclick = (e) => { e.stopPropagation(); stepLbZoom(1); upgradeLbToOriginal(); };
 document.getElementById('lb-zoom-out').onclick = (e) => { e.stopPropagation(); stepLbZoom(-1); };
 document.getElementById('lb-zoom-label').onclick = (e) => {
   e.stopPropagation();
@@ -3091,6 +3185,9 @@ document.getElementById('ed-rename').onclick = async () => {
       p.original = '/photo/' + j.path + q(p.original);
       if (p.thumb) {
         p.thumb = '/thumb/' + j.path.replace(/\.[^.]*$/, '') + '_thumb.webp' + q(p.thumb);
+      }
+      if (p.view) {
+        p.view = '/view/' + j.path.replace(/\.[^.]*$/, '') + '_view.webp' + q(p.view);
       }
     }
     p.path = j.path; p.filename = j.filename;

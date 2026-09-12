@@ -3,6 +3,7 @@
 CLI:
   python3 -m selfphoto.ingest scan           # データフォルダを走査して DB 登録
   python3 -m selfphoto.ingest thumbs [N]     # 未生成サムネイルを N 枚処理（省略時は全部）
+  python3 -m selfphoto.ingest views [N]      # 未生成ビューア用プレビューを N 枚処理（省略時は全部）
   python3 -m selfphoto.ingest import SRC_DIR # SD カード等から日付フォルダへコピーして登録
 """
 from __future__ import annotations
@@ -116,6 +117,54 @@ def thumb_rel_path(rel: str, base: str) -> str:
     return f"{Path(rel).with_suffix('').as_posix()}_{base}{common.THUMB_EXT}"
 
 
+def view_rel_path(rel: str) -> str:
+    """ビューア用プレビュー画像の相対パス（VIEW_DIR からの相対）。"""
+    return f"{Path(rel).with_suffix('').as_posix()}_view{common.VIEW_EXT}"
+
+
+def make_view_image(src: Path, dst: Path) -> bool:
+    """1 枚のビューア用プレビュー画像を生成する。成功したら True。
+
+    長辺 common.VIEW_SIZE px に縮小した WebP。Exif Orientation を反映する。
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return False
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(src) as im:
+            im.draft("RGB", (common.VIEW_SIZE * 2, common.VIEW_SIZE * 2))
+            # WebP アニメ対策で先頭フレームのみ
+            try:
+                im.seek(0)
+            except Exception:
+                pass
+            # Exif Orientation を反映（縦写真は縦向きのプレビューになる）
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+            if im is None:
+                raise ValueError("exif_transpose failed")
+            im = im.convert("RGB")
+            im.thumbnail((common.VIEW_SIZE, common.VIEW_SIZE), Image.LANCZOS)
+            im.save(dst, "WEBP", quality=common.VIEW_QUALITY, method=4)
+        return True
+    except Exception as e:
+        print(f"view error {src}: {e}", file=sys.stderr)
+        return False
+
+
+def make_view(row) -> bool:
+    """DB 行からビューア用プレビュー画像を生成する。成功したら True。"""
+    if int(row["is_video"] or 0):
+        return False
+    src = common.PHOTO_DIR / row["path"]
+    dst = common.VIEW_DIR / view_rel_path(row["path"])
+    return make_view_image(src, dst)
+
+
 def make_thumbnail(row) -> bool:
     """1 枚のサムネイルを生成する。成功したら True。"""
     try:
@@ -171,6 +220,37 @@ def process_thumbnails(limit: int | None = None, max_workers: int = 4) -> None:
         for r in ex_.map(make_thumbnail, rows):
             ok += 1 if r else 0
     print(f"thumbs: {ok}/{len(rows)} done")
+
+
+def process_views(limit: int | None = None, max_workers: int = 4) -> None:
+    """未生成のビューア用プレビュー画像をまとめて生成する（backfill 用）。
+
+    DB に追跡列を持たないため、対応ファイルが無い・または元画像より古い
+    ものを対象にする。動画は対象外。
+    """
+    common.init_db()
+    conn = common.get_db()
+    sql = "SELECT * FROM photos WHERE is_video=0 ORDER BY captured_at DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    rows = conn.execute(sql).fetchall()
+    targets = []
+    for r in rows:
+        try:
+            src = common.PHOTO_DIR / r["path"]
+            dst = common.VIEW_DIR / view_rel_path(r["path"])
+            if not src.is_file():
+                continue
+            if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
+                continue
+            targets.append(r)
+        except OSError:
+            continue
+    ok = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex_:
+        for r in ex_.map(make_view, targets):
+            ok += 1 if r else 0
+    print(f"views: {ok}/{len(targets)} done")
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +388,9 @@ def main(argv: list[str]) -> None:
     elif len(argv) >= 1 and argv[0] == "thumbs":
         limit = int(argv[1]) if len(argv) >= 2 else None
         process_thumbnails(limit)
+    elif len(argv) >= 1 and argv[0] == "views":
+        limit = int(argv[1]) if len(argv) >= 2 else None
+        process_views(limit)
     elif len(argv) >= 2 and argv[0] == "import":
         import_source(argv[1], dry_run=("--dry-run" in argv))
     else:

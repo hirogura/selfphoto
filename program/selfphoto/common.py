@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-VERSION = "0.9.9"
+VERSION = "1.0.0"
 
 # ディレクトリ設定
 # 写真・サムネイル・DB はプログラム領域 (/opt/selfphoto) と完全に分離し、
@@ -16,6 +16,9 @@ PROGRAM_DIR = Path(os.environ.get("SELFPHPHOTO_PROGRAM_DIR", "/opt/selfphoto/pro
 DATA_DIR = Path(os.environ.get("SELFPHPHOTO_DATA_DIR", "/opt/lxd-data/selfphoto-data"))
 PHOTO_DIR = Path(os.environ.get("SELFPHPHOTO_PHOTO_DIR", str(DATA_DIR / "photo")))
 THUMB_DIR = Path(os.environ.get("SELFPHPHOTO_THUMB_DIR", str(DATA_DIR / "thumbnail")))
+# ビューア用プレビュー画像（長辺 VIEW_SIZE px に縮小）を置く場所。
+# 一覧サムネイル（512px）では粗いがオリジナルは重い、という中間を担う。
+VIEW_DIR = Path(os.environ.get("SELFPHPHOTO_VIEW_DIR", str(DATA_DIR / "thumbnail-view")))
 # 編集画像フォルダ（編集モードの「編集フォルダに保存」の保存先。一覧とは分離）
 EDIT_PHOTO_DIR = Path(os.environ.get("SELFPHPHOTO_EDIT_DIR", str(DATA_DIR / "edit-photo")))
 DB_PATH = Path(os.environ.get("SELFPHPHOTO_DB", str(DATA_DIR / "selfphoto.db")))
@@ -36,6 +39,11 @@ SUPPORTED_EXTS = PHOTO_EXTS | VIDEO_EXTS
 # サムネイルは年/年月/ベース名.webp
 THUMB_SIZE = 512
 THUMB_EXT = ".webp"
+
+# ビューア用プレビューは長辺 1280px の WebP
+VIEW_SIZE = 1280
+VIEW_EXT = ".webp"
+VIEW_QUALITY = 80
 
 _local = threading.local()
 
