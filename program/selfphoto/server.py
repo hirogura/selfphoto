@@ -447,10 +447,26 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "install.sh not found in repo"}, 500)
                     return
                 env = dict(os.environ, SELFPHPHOTO_HOME=home)
-                inst = subprocess.run(
-                    ["bash", "install.sh"], cwd=repo_dir,
-                    capture_output=True, text=True, timeout=600, env=env,
-                )
+                if (os.path.isdir("/run/systemd/system")
+                        and shutil.which("systemctl")
+                        and shutil.which("systemd-run")):
+                    # サーバ本体は ProtectSystem=strict 等でサンドボックス化されて
+                    # いるため、子プロセスのまま install.sh を実行しても
+                    # /opt/selfphoto 等が read-only で書けない。制限なしの一時
+                    # ユニットで実行する（終了コード・出力は --pipe/--wait で回収）。
+                    inst = subprocess.run(
+                        ["systemd-run", "--pipe", "--wait", "--collect",
+                         f"--working-directory={repo_dir}",
+                         f"--setenv=SELFPHPHOTO_HOME={home}",
+                         "-p", "ProtectSystem=no",
+                         "bash", "./install.sh"],
+                        capture_output=True, text=True, timeout=660,
+                    )
+                else:
+                    inst = subprocess.run(
+                        ["bash", "install.sh"], cwd=repo_dir,
+                        capture_output=True, text=True, timeout=600, env=env,
+                    )
                 if inst.returncode != 0:
                     tail = (inst.stderr.strip() or inst.stdout.strip())[-2000:]
                     self.send_json({"ok": False,
