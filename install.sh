@@ -68,6 +68,35 @@ else
   fi
 fi
 
+# ===== rsync 依存の解決（バックアップ機能用） =====
+# あればそのまま使う。無ければ主要なパッケージマネージャで自動導入する。
+if command -v rsync >/dev/null 2>&1; then
+  echo "rsync: 既にインストール済み ($(rsync --version | head -n 1))"
+else
+  echo "rsync が無いためインストールします..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq rsync openssh-client
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y rsync openssh-clients
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y rsync openssh-clients
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache rsync openssh-client
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm rsync openssh
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install rsync openssh
+  else
+    echo "警告: 対応するパッケージマネージャが見つかりません。" >&2
+    echo "  手動で rsync を導入してください" >&2
+  fi
+  if command -v rsync >/dev/null 2>&1; then
+    echo "OK: rsync 導入完了"
+  else
+    echo "警告: rsync 無しで続行します（バックアップ機能が使えません）"
+  fi
+fi
+
 # ===== プログラム配置 =====
 # リポジトリ直下（install.sh と program/ が並ぶ場所）でも、
 # program/ 配下（program/install.sh）でも実行できるようにする。

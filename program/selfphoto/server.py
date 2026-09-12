@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.1.3"
+    server_version = "selfphoto/0.2.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -292,6 +292,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_edit_save()
             elif path == "/api/edit-overwrite":
                 self.api_edit_overwrite()
+            elif path == "/api/backup-run":
+                self.api_backup_run()
+            elif path == "/api/backup-watch":
+                self.api_backup_watch()
+            elif path == "/api/backup-config":
+                self.api_backup_save()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -369,6 +375,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self.send_json({"error": f"upload failed: {e}", "results": results, "errors": errors}, 500)
             return
+        if results:
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
         self.send_json({"ok": True, "count": len(results), "results": results, "errors": errors})
 
     def route(self) -> None:
@@ -386,6 +398,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_photos(parsed.query)
         elif path == "/api/edits":
             self.api_edits()
+        elif path == "/api/backup-config":
+            self.api_backup_config()
+        elif path == "/api/backup-status":
+            self.api_backup_status()
         elif path == "/api/months":
             self.api_months()
         elif path == "/api/search":
@@ -890,6 +906,11 @@ class Handler(BaseHTTPRequestHandler):
                 n += 1
             with dest.open("wb") as out:
                 shutil.copyfileobj(payload, out, length=4 * 1024 * 1024)
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
             self.send_json({"ok": True, "name": dest.name, "path": f"edit/{dest.name}"})
         except Exception as e:  # noqa: BLE001
             self.send_json({"error": str(e)}, 500)
@@ -934,6 +955,11 @@ class Handler(BaseHTTPRequestHandler):
                         cache.unlink()
                 except OSError:
                     pass
+                try:
+                    from . import backup
+                    backup.mark_dirty()
+                except Exception:
+                    pass
                 self.send_json({"ok": True, "path": rel})
                 return
             dst = safe_join(common.PHOTO_DIR, rel)
@@ -967,6 +993,11 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if row:
                 ingest.make_thumbnail(row)
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
             self.send_json({"ok": True, "path": rel})
         except Exception as e:  # noqa: BLE001
             self.send_json({"error": str(e)}, 500)
@@ -975,6 +1006,103 @@ class Handler(BaseHTTPRequestHandler):
                 payload.close()
             except Exception:
                 pass
+
+    def _read_json_body(self, max_len: int = 1024 * 1024):
+        """JSON ボディを読む。失敗時は None。"""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > max_len:
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            return None
+
+    def api_backup_config(self) -> None:
+        """バックアップ設定を返す（パスワードはマスク）。"""
+        from . import backup
+
+        cfg = backup.load_config()
+        ssh = dict(cfg.get("ssh") or {})
+        ssh["password"] = "****" if ssh.get("password") else ""
+        self.send_json({
+            "source": cfg.get("source"), "target": cfg.get("target"),
+            "ssh": ssh, "watch": cfg.get("watch"),
+            "fixedOptions": backup.FIXED_OPTS,
+            "exclude": backup.EXCLUDE_UPLOAD_TMP,
+            "intervals": backup.WATCH_INTERVALS,
+            "rsyncAvailable": backup.rsync_available(),
+            "watching": backup.is_watching(),
+            "lastRun": cfg.get("lastRun"),
+        })
+
+    def api_backup_save(self) -> None:
+        """バックアップ設定を保存する。"""
+        from . import backup
+
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        cfg = backup.load_config()
+        for k in ("source", "target"):
+            if k in body and isinstance(body[k], str):
+                cfg[k] = body[k].strip()
+        if isinstance(body.get("ssh"), dict):
+            for k in ("enabled", "host", "user", "port", "key", "password"):
+                if k in body["ssh"]:
+                    v = body["ssh"][k]
+                    cfg["ssh"][k] = bool(v) if k == "enabled" else (str(v) if v is not None else "")
+            # "****" のままなら既存パスワードを維持する
+            if body["ssh"].get("password") in (None, "", "****"):
+                cfg["ssh"]["password"] = backup.load_config()["ssh"].get("password", "")
+        if isinstance(body.get("watch"), dict):
+            if "enabled" in body["watch"]:
+                cfg["watch"]["enabled"] = bool(body["watch"]["enabled"])
+            if "intervalSec" in body["watch"]:
+                try:
+                    cfg["watch"]["intervalSec"] = int(body["watch"]["intervalSec"])
+                except (TypeError, ValueError):
+                    pass
+        err = backup.validate_config(cfg)
+        if err:
+            self.send_json({"error": err}, 400)
+            return
+        backup.save_config(cfg)
+        backup.set_watch(bool(cfg["watch"].get("enabled")))
+        self.send_json({"ok": True})
+
+    def api_backup_run(self) -> None:
+        """バックアップを今すぐ実行する（バックグラウンド）。"""
+        from . import backup
+
+        r = backup.run_async(detail="manual")
+        if r.get("alreadyRunning"):
+            self.send_json({"error": "already running"}, 409)
+            return
+        self.send_json({"ok": True, "started": True})
+
+    def api_backup_status(self) -> None:
+        """バックアップの状態・前回結果を返す。"""
+        from . import backup
+
+        st = backup.status()
+        st["watching"] = backup.is_watching()
+        self.send_json(st)
+
+    def api_backup_watch(self) -> None:
+        """監視の開始・停止。"""
+        from . import backup
+
+        body = self._read_json_body() or {}
+        enabled = bool(body.get("enabled"))
+        cfg = backup.load_config()
+        cfg["watch"]["enabled"] = enabled
+        backup.save_config(cfg)
+        r = backup.set_watch(enabled)
+        self.send_json({"ok": True, "watching": r.get("watching", False)})
 
     def _write_chunk(self, data: bytes) -> None:
         if data:
@@ -1115,6 +1243,33 @@ header .spacer { flex: 1; }
 }
 #search-box:focus { border-color: var(--accent); }
 main { padding: 0 8px 80px 228px; }
+/* ---------------- backup ---------------- */
+#backup-form { max-width: 640px; padding: 8px 4px 40px; display: flex; flex-direction: column; gap: 10px; }
+#backup-form h2 { font-size: 17px; margin: 8px 0 0; }
+#backup-form h3 { font-size: 14px; margin: 12px 0 0; }
+#backup-form .bk-desc { color: var(--muted); font-size: 12px; margin: 0; }
+#backup-form code { background: var(--chip); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+#backup-form label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+#backup-form input[type="text"], #backup-form input[type="password"], #backup-form select {
+  flex: 1; background: var(--chip); border: 1px solid #33363c; border-radius: 8px;
+  padding: 7px 10px; color: var(--fg); font-size: 13px; outline: none; min-width: 0;
+}
+#backup-form fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+#backup-form legend { font-size: 13px; padding: 0 6px; }
+#backup-form .bk-check { font-size: 13px; }
+#bk-ssh-fields { display: flex; flex-direction: column; gap: 8px; }
+#backup-form .bk-row { display: flex; gap: 8px; align-items: center; font-size: 13px; flex-wrap: wrap; }
+#backup-form .bk-row button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 8px 16px; font-size: 13px; cursor: pointer;
+}
+#backup-form .bk-row button:hover { background: #33363c; }
+#bk-status { font-size: 13px; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+#bk-log {
+  background: #0a0b0d; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: 11px; color: var(--muted);
+  max-height: 320px; overflow: auto; white-space: pre-wrap; margin: 0;
+}
 
 /* ---------------- timeline ---------------- */
 .month-head {
@@ -1330,6 +1485,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-photos" class="active"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="M21 16l-5-5-9 9"/></svg></span><span class="lbl">写真</span></button>
     <button id="nav-edits"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L20 8l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></span><span class="lbl">編集写真</span></button>
     <button id="nav-search"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></span><span class="lbl">検索</span></button>
+    <button id="nav-backup"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">バックアップ</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
   </nav>
   <div class="foot">
@@ -1429,21 +1585,26 @@ const fday = d => {
 const searchBox = document.getElementById('search-box');
 const viewTitle = document.getElementById('view-title');
 let searchTimer = null;
+let backupTimer = null;
 
 document.getElementById('nav-photos').onclick = () => setView('photos');
 document.getElementById('nav-edits').onclick = () => setView('edits');
 document.getElementById('nav-search').onclick = () => { setView('search'); searchBox.focus(); };
+document.getElementById('nav-backup').onclick = () => setView('backup');
 document.getElementById('nav-upload').onclick = () => fileInput.click();
 
 function setView(v) {
   state.view = v;
+  if (backupTimer) { clearInterval(backupTimer); backupTimer = null; }
   document.querySelectorAll('#sidebar nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('nav-' + v).classList.add('active');
-  viewTitle.textContent = v === 'search' ? '検索' : (v === 'edits' ? '編集写真' : '写真');
+  viewTitle.textContent = v === 'search' ? '検索' : (v === 'edits' ? '編集写真' : (v === 'backup' ? 'バックアップ' : '写真'));
   searchBox.style.display = v === 'search' ? 'block' : 'none';
   if (v === 'search') {
     if (!state.term) state.term = '';
     reload();
+  } else if (v === 'backup') {
+    reloadBackup();
   } else {
     state.term = '';
     searchBox.value = '';
@@ -1466,8 +1627,149 @@ async function loadMonths() {
   document.getElementById('count').textContent = `${j.total} 枚`;
 }
 
+// ---------------- backup settings ----------------
+const WATCH_LABELS = { 60: '1分ごと', 300: '5分ごと', 900: '15分ごと', 1800: '30分ごと', 3600: '1時間ごと' };
+function reloadBackup() {
+  state.photos = []; state.offset = 0; state.done = true;
+  state.selected.clear(); state.folderSel.clear(); state.monthSel.clear();
+  renderBackup();
+  refreshBackupStatus();
+  if (backupTimer) clearInterval(backupTimer);
+  backupTimer = setInterval(() => { if (state.view === 'backup') refreshBackupStatus(); }, 3000);
+}
+function renderBackup() {
+  const tl = document.getElementById('timeline');
+  tl.innerHTML = '';
+  document.getElementById('loading').textContent = '';
+  const wrap = document.createElement('div');
+  wrap.id = 'backup-form';
+  wrap.innerHTML = `
+    <h2>バックアップ設定</h2>
+    <p class="bk-desc">rsync で写真フォルダをコピーします（オプション固定: <code>-r -t -u -v --progress</code>）。</p>
+    <label>ソースフォルダ<input id="bk-source" type="text"></label>
+    <label>ターゲットフォルダ<input id="bk-target" type="text" placeholder="/mnt/backup/selfphoto または SSH時はリモートパス"></label>
+    <div class="bk-row">除外: <code>.upload-tmp/</code>（固定）</div>
+    <fieldset><legend>SSHリモート接続</legend>
+      <label class="bk-check"><input id="bk-ssh-on" type="checkbox"> SSH経由で転送する</label>
+      <div id="bk-ssh-fields">
+        <label>ホスト<input id="bk-ssh-host" type="text" placeholder="例: 192.0.2.10"></label>
+        <label>ユーザー<input id="bk-ssh-user" type="text"></label>
+        <label>ポート<input id="bk-ssh-port" type="text" placeholder="22"></label>
+        <label>鍵ファイル<input id="bk-ssh-key" type="text" placeholder="例: /root/.ssh/id_rsa（任意）"></label>
+        <label>パスワード<input id="bk-ssh-pw" type="password" placeholder="変更しない場合は空欄"></label>
+      </div>
+    </fieldset>
+    <fieldset><legend>監視（自動実行）</legend>
+      <div class="bk-desc">保存・取込で写真が増えたら、選択した間隔で自動コピーします。</div>
+      <label>間隔<select id="bk-interval"></select></label>
+    </fieldset>
+    <div class="bk-row">
+      <button id="bk-save">設定を保存</button>
+      <button id="bk-run">コピー実行</button>
+      <button id="bk-watch">監視開始</button>
+    </div>
+    <div id="bk-status"></div>
+    <h3>実行ログ（最新）</h3>
+    <pre id="bk-log"></pre>`;
+  tl.appendChild(wrap);
+  document.getElementById('bk-save').onclick = saveBackupConfig;
+  document.getElementById('bk-run').onclick = runBackupNow;
+  document.getElementById('bk-watch').onclick = toggleBackupWatch;
+  fetch('/api/backup-config').then(r => r.json()).then(j => {
+    if (state.view !== 'backup') return;
+    document.getElementById('bk-source').value = j.source || '';
+    document.getElementById('bk-target').value = j.target || '';
+    const ssh = j.ssh || {};
+    document.getElementById('bk-ssh-on').checked = !!ssh.enabled;
+    document.getElementById('bk-ssh-host').value = ssh.host || '';
+    document.getElementById('bk-ssh-user').value = ssh.user || '';
+    document.getElementById('bk-ssh-port').value = ssh.port || '22';
+    document.getElementById('bk-ssh-key').value = ssh.key || '';
+    const sel = document.getElementById('bk-interval');
+    sel.innerHTML = '';
+    (j.intervals || [300]).forEach(iv => {
+      const o = document.createElement('option');
+      o.value = iv; o.textContent = WATCH_LABELS[iv] || `${iv}秒ごと`;
+      sel.appendChild(o);
+    });
+    sel.value = String((j.watch || {}).intervalSec || 300);
+    refreshBackupStatus();
+  }).catch(() => {
+    document.getElementById('bk-status').textContent = '設定を取得できませんでした';
+  });
+}
+function backupFormValues() {
+  return {
+    source: document.getElementById('bk-source').value,
+    target: document.getElementById('bk-target').value,
+    ssh: {
+      enabled: document.getElementById('bk-ssh-on').checked,
+      host: document.getElementById('bk-ssh-host').value,
+      user: document.getElementById('bk-ssh-user').value,
+      port: document.getElementById('bk-ssh-port').value || '22',
+      key: document.getElementById('bk-ssh-key').value,
+      password: document.getElementById('bk-ssh-pw').value,
+    },
+    watch: { intervalSec: parseInt(document.getElementById('bk-interval').value, 10) || 300 },
+  };
+}
+async function saveBackupConfig() {
+  const body = backupFormValues();
+  // パスワード空欄は「変更なし」の意味。**** は送らない。
+  const r = await fetch('/api/backup-config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  if (!j.ok) { alert('保存に失敗しました: ' + (j.error || 'unknown')); return; }
+  document.getElementById('bk-ssh-pw').value = '';
+  alert('保存しました');
+  refreshBackupStatus();
+}
+async function runBackupNow() {
+  const r = await fetch('/api/backup-run', { method: 'POST' });
+  const j = await r.json();
+  if (!j.ok && !j.started) { alert('実行できませんでした: ' + (j.error || 'unknown')); return; }
+  refreshBackupStatus();
+}
+async function toggleBackupWatch() {
+  const st = await (await fetch('/api/backup-status')).json();
+  const r = await fetch('/api/backup-watch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !st.watching }),
+  });
+  const j = await r.json();
+  if (!j.ok) { alert('切替に失敗しました'); return; }
+  refreshBackupStatus();
+}
+async function refreshBackupStatus() {
+  if (state.view !== 'backup') return;
+  const stEl = document.getElementById('bk-status');
+  const logEl = document.getElementById('bk-log');
+  const watchBtn = document.getElementById('bk-watch');
+  if (!stEl) return;
+  let st;
+  try {
+    st = await (await fetch('/api/backup-status')).json();
+  } catch (err) {
+    stEl.textContent = '状態を取得できませんでした';
+    return;
+  }
+  if (!st.rsyncAvailable) {
+    stEl.innerHTML = '警告: rsync が見つかりません（<code>apt install rsync</code> 等で導入してください）';
+  } else {
+    const last = st.lastRun;
+    const lastTxt = last
+      ? `前回: ${last.ok ? '成功' : '失敗'}（${new Date(last.finishedAt * 1000).toLocaleString()}）`
+      : '前回: まだ実行していません';
+    stEl.textContent = `監視: ${st.watching ? 'ON' : 'OFF'} / 状態: ${st.running ? '実行中…' : (st.dirty ? '未コピーあり' : '待機中')} / ${lastTxt}`;
+  }
+  if (watchBtn) watchBtn.textContent = st.watching ? '監視停止' : '監視開始';
+  if (logEl) logEl.textContent = (st.lastRun && st.lastRun.logTail) || '(ログなし)';
+}
+
 async function loadPhotos() {
-  if (state.done) return;
+  if (state.view === 'backup' || state.done) return;
   document.getElementById('loading').textContent = '読み込み中…';
   if (state.view === 'edits') {
     // 編集画像フォルダは全件一括（件数は少ない想定）
@@ -2459,7 +2761,10 @@ loadPhotos();
 def main() -> None:
     common.PHOTO_DIR.mkdir(parents=True, exist_ok=True)
     common.THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    common.EDIT_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
     common.init_db()
+    from . import backup
+    backup.ensure_watch()
     server = ThreadingHTTPServer((common.HOST, common.PORT), Handler)
     server.daemon_threads = True
 

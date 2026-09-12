@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.1.3 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.2.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -36,6 +36,7 @@ Web UI 左上に表示）。
 - ポート: 127.0.0.1:3360（tailscale serve で公開）
 - 依存: Python 3.10+。Pillow（推奨, `apt install python3-pil`）。HEIC のデコードには
   `pillow-heif` が必要（無い場合はファイル日時で整理される）。
+  バックアップ機能には `rsync` が必要（`install.sh` が自動導入を試みる）。
 
 ## インストール
 
@@ -136,7 +137,7 @@ python3 -m selfphoto.server
 ```
 
 Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写真／検索／
-アップロード、
+バックアップ／アップロード、
 左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動、
 「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
@@ -176,6 +177,25 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 - **別名保存** : 通常の取り込みとして新規登録（`元の名前_edit.jpg`）
 - **編集フォルダに保存** : `edit-photo/` に保存。サイドバー「編集写真」で表示
 
+## バックアップ
+
+サイドバー「バックアップ」で rsync によるコピー設定を行う
+（[rsyncgui](https://github.com/hirogura/rsyncgui.git) と同じ方式）。
+設定は `/opt/lxd-data/selfphoto-data/backup.json` に保存される
+（パスワードを含むためパーミッション 600。リポジトリには含まれない）。
+
+- **ソースフォルダ** : 既定は写真フォルダ全体。`photo/2026` のように絞っても可。
+  `.upload-tmp/` は常に除外される
+- **ターゲットフォルダ** : ローカルパスまたは SSH 有効時はリモートパス
+- **SSHリモート接続** : ホスト・ユーザー・ポート・鍵ファイル・パスワードを指定
+  （パスワード認証には `sshpass` が必要。鍵認証を推奨）
+- **オプション固定** : `-r`（再帰） `-t`（時刻維持） `-u`（新しいもののみ）
+  `-v`（詳細） `--progress`（進捗）
+- **コピー実行** : 今すぐコピー（バックグラウンド実行、状態表示で進捗確認）
+- **監視開始** : 保存・取込で写真が増えたら、選択した間隔（1/5/15/30/60分、
+  既定5分）で自動コピー。変更がなければ実行しないため、保存のたびに
+  全体走査する方式より軽い。サーバー再起動後も設定どおり復帰する
+
 ## 設定（環境変数）
 
 | 変数 | 既定値 | 説明 |
@@ -201,6 +221,11 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 - `GET /api/edits` — 編集画像フォルダの一覧
 - `POST /api/edit-save` — 編集結果を編集フォルダに保存（multipart）
 - `POST /api/edit-overwrite` — 編集結果で上書き保存（multipart `path` + ファイル）
+- `GET /api/backup-config` — バックアップ設定を取得（パスワードはマスク）
+- `POST /api/backup-config` — バックアップ設定を保存
+- `POST /api/backup-run` — バックアップを今すぐ実行（バックグラウンド）
+- `GET /api/backup-status` — バックアップの状態・前回結果
+- `POST /api/backup-watch` — 監視の開始・停止（JSON `{"enabled": true}`）
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
 - `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
