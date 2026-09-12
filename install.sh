@@ -84,19 +84,34 @@ install -d -m 755 "${SELFPHPHOTO_HOME}"
 install -d -m 755 "${SELFPHPHOTO_HOME}/program"
 
 # selfphoto パッケージと systemd ユニットを置き換え（DB selfphoto.db は保持）
-rm -rf "${SELFPHPHOTO_HOME}/program/selfphoto" "${SELFPHPHOTO_HOME}/program/systemd"
-cp -a "${SRC_PROGRAM}/selfphoto" "${SELFPHPHOTO_HOME}/program/"
-cp -a "${SRC_PROGRAM}/systemd" "${SELFPHPHOTO_HOME}/program/"
+# 注意: リポジトリを /opt/selfphoto に直接 clone して ./install.sh する
+# ドキュメント通りの手順では、コピー元 (SRC_PROGRAM) と配置先
+# (${SELFPHPHOTO_HOME}/program) が同一になる。このまま rm -rf すると
+# ソース自身を消してしまい「cp: cannot stat ... No such file or directory」
+# で起動できなくなるため、同一パスではコピーをスキップする。
+DEST_PROGRAM="${SELFPHPHOTO_HOME}/program"
+if [[ "${SRC_PROGRAM%/}" == "${DEST_PROGRAM%/}" ]]; then
+  echo "インプレース実行のためプログラムのコピーをスキップします (${DEST_PROGRAM})"
+else
+  rm -rf "${SELFPHPHOTO_HOME}/program/selfphoto" "${SELFPHPHOTO_HOME}/program/systemd"
+  cp -a "${SRC_PROGRAM}/selfphoto" "${SELFPHPHOTO_HOME}/program/"
+  cp -a "${SRC_PROGRAM}/systemd" "${SELFPHPHOTO_HOME}/program/"
+fi
 find "${SELFPHPHOTO_HOME}/program" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # アイコン（ファビコン / apple-touch-icon）があれば配置
-if [[ -d "${SCRIPT_DIR}/icon" ]]; then
+# インプレース実行（SCRIPT_DIR == 配置先）では同一ファイルなのでスキップする。
+if [[ -d "${SCRIPT_DIR}/icon" && "${SCRIPT_DIR%/}" != "${SELFPHPHOTO_HOME%/}" ]]; then
   mkdir -p "${SELFPHPHOTO_HOME}/icon"
   cp -a "${SCRIPT_DIR}/icon/." "${SELFPHPHOTO_HOME}/icon/"
 fi
 
 # README / LICENSE / uninstall.sh があれば /opt/selfphoto/ にも配置
+# インプレース実行ではコピー元と配置先が同一ファイルなのでスキップする。
 for f in README.md LICENSE uninstall.sh; do
+  if [[ "${SCRIPT_DIR%/}" == "${SELFPHPHOTO_HOME%/}" && -f "${SELFPHPHOTO_HOME}/$f" ]]; then
+    continue
+  fi
   if [[ -f "${SCRIPT_DIR}/$f" ]]; then
     cp -a "${SCRIPT_DIR}/$f" "${SELFPHPHOTO_HOME}/"
   elif [[ -f "${SRC_PROGRAM}/$f" ]]; then
