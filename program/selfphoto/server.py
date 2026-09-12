@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.7.1"
+    server_version = "selfphoto/0.7.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする

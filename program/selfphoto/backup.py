@@ -490,23 +490,46 @@ def _current_interval() -> int:
     return iv if iv in WATCH_INTERVALS else DEFAULT_INTERVAL
 
 
+def _photo_max_id() -> int | None:
+    """photos テーブルの MAX(id)。dirty フラグに加えて件数変化も見ることで、
+    Web 以外（スキャンタイマー・CLI 取込）で増えた分も監視コピーするため。"""
+    try:
+        row = common.get_db().execute("SELECT MAX(id) AS m FROM photos").fetchone()
+        return int(row["m"]) if row and row["m"] is not None else 0
+    except Exception:
+        return None
+
+
 def _watch_loop() -> None:
     global _watch_stop
     stop = _watch_stop
+    # スレッド開始時点を基準にし、再起動直後の不要なコピーは避ける
+    baseline = _photo_max_id()
     while stop is not None and not stop.wait(_current_interval()):
         with _lock:
             dirty = _dirty
-        if dirty:
-            run_once(detail="watch")
+        cur = _photo_max_id()
+        grown = (cur is not None and baseline is not None and cur > baseline)
+        if cur is not None and baseline is not None and cur < baseline:
+            baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
+        if dirty or grown:
+            r = run_once(detail="watch")
+            if r.get("ok"):
+                baseline = _photo_max_id()
 
 
 def set_watch(enabled: bool) -> dict:
-    """監視スレッドの開始・停止。"""
+    """監視スレッドの開始・停止。
+
+    開始時は既存スレッドがあっても作り直す。設定保存で間隔を変えたときに
+    古い間隔で眠り続けてコピーされないことがないようにするため。
+    """
     global _watch_thread, _watch_stop
     with _lock:
         if enabled:
-            if _watch_thread is not None and _watch_thread.is_alive():
-                return {"ok": True, "watching": True}
+            old = _watch_thread
+            if old is not None and old.is_alive() and _watch_stop is not None:
+                _watch_stop.set()
             _watch_stop = threading.Event()
             _watch_thread = threading.Thread(target=_watch_loop, daemon=True)
             _watch_thread.start()
