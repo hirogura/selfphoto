@@ -21,6 +21,7 @@ SELFPHPHOTO_DATA_ROOT="${SELFPHPHOTO_DATA_ROOT:-/opt/lxd-data}"
 SELFPHPHOTO_DATA_DIR="${SELFPHPHOTO_DATA_DIR:-${SELFPHPHOTO_DATA_ROOT}/selfphoto-data}"
 SELFPHPHOTO_PHOTO_DIR="${SELFPHPHOTO_PHOTO_DIR:-${SELFPHPHOTO_DATA_DIR}/photo}"
 SELFPHPHOTO_THUMB_DIR="${SELFPHPHOTO_THUMB_DIR:-${SELFPHPHOTO_DATA_DIR}/thumbnail}"
+SELFPHPHOTO_EDIT_DIR="${SELFPHPHOTO_EDIT_DIR:-${SELFPHPHOTO_DATA_DIR}/edit-photo}"
 SELFPHPHOTO_DB="${SELFPHPHOTO_DB:-${SELFPHPHOTO_DATA_DIR}/selfphoto.db}"
 
 # ===== sudo/root チェック =====
@@ -125,8 +126,8 @@ fi
 # ===== データ・写真・サムネイル用ディレクトリを事前に作成 =====
 # mkdir -p は既存フォルダがあっても削除・上書きしない（中身はそのまま保持される）。
 # server 起動時に DB・写真ディレクトリが無いと起動失敗するため、移行処理より先に作る。
-mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
-chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
+mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}" "${SELFPHPHOTO_EDIT_DIR}"
+chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}" "${SELFPHPHOTO_EDIT_DIR}"
 
 # ===== 旧配置のデータ移行（プログラム領域に置きっぱなしになっている場合） =====
 # 旧バージョンは写真・サムネイル・DB を /opt/selfphoto 配下に置いていたため、
@@ -191,8 +192,8 @@ shopt -u nullglob
 
 # ===== データ・写真・サムネイル・DB ディレクトリ作成（念のため再確認） =====
 # mkdir -p は既存フォルダがあっても削除しない。既存データ・DB は触らない（更新インストールでも保持される）
-mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
-chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
+mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}" "${SELFPHPHOTO_EDIT_DIR}"
+chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}" "${SELFPHPHOTO_EDIT_DIR}"
 
 # ===== systemd ユニット登録 =====
 if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
@@ -234,6 +235,7 @@ echo "配置先       : ${SELFPHPHOTO_HOME}"
 echo "データ       : ${SELFPHPHOTO_DATA_DIR}"
 echo "写真         : ${SELFPHPHOTO_PHOTO_DIR}"
 echo "サムネイル   : ${SELFPHPHOTO_THUMB_DIR}"
+echo "編集写真     : ${SELFPHPHOTO_EDIT_DIR}"
 echo "DB           : ${SELFPHPHOTO_DB}"
 echo
 echo "バックアップ  : ${SELFPHPHOTO_PHOTO_DIR} をコピーするだけで写真は全部取れます"

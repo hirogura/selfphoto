@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-VERSION = "0.0.8"
+VERSION = "0.1.0"
 
 # ディレクトリ設定
 # 写真・サムネイル・DB はプログラム領域 (/opt/selfphoto) と完全に分離し、
@@ -16,6 +16,8 @@ PROGRAM_DIR = Path(os.environ.get("SELFPHPHOTO_PROGRAM_DIR", "/opt/selfphoto/pro
 DATA_DIR = Path(os.environ.get("SELFPHPHOTO_DATA_DIR", "/opt/lxd-data/selfphoto-data"))
 PHOTO_DIR = Path(os.environ.get("SELFPHPHOTO_PHOTO_DIR", str(DATA_DIR / "photo")))
 THUMB_DIR = Path(os.environ.get("SELFPHPHOTO_THUMB_DIR", str(DATA_DIR / "thumbnail")))
+# 編集画像フォルダ（編集モードの「編集フォルダに保存」の保存先。一覧とは分離）
+EDIT_PHOTO_DIR = Path(os.environ.get("SELFPHPHOTO_EDIT_DIR", str(DATA_DIR / "edit-photo")))
 DB_PATH = Path(os.environ.get("SELFPHPHOTO_DB", str(DATA_DIR / "selfphoto.db")))
 
 # サーバ設定

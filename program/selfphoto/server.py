@@ -19,6 +19,7 @@ import tempfile
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote, quote
 
@@ -184,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.8"
+    server_version = "selfphoto/0.1.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -287,6 +288,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_update()
             elif path == "/api/delete":
                 self.api_delete()
+            elif path == "/api/edit-save":
+                self.api_edit_save()
+            elif path == "/api/edit-overwrite":
+                self.api_edit_overwrite()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -379,12 +384,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "icon not found"}, 404)
         elif path == "/api/photos":
             self.api_photos(parsed.query)
+        elif path == "/api/edits":
+            self.api_edits()
         elif path == "/api/months":
             self.api_months()
         elif path == "/api/search":
             self.api_search(parsed.query)
         elif path.startswith("/thumb/"):
             self.serve_thumb(path[len("/thumb/"):])
+        elif path.startswith("/editthumb/"):
+            self.serve_editthumb(path[len("/editthumb/"):])
+        elif path.startswith("/editphoto/"):
+            self.serve_editphoto(path[len("/editphoto/"):])
         elif path.startswith("/photo/"):
             self.serve_photo(path[len("/photo/"):])
         elif path == "/api/zip":
@@ -649,7 +660,9 @@ class Handler(BaseHTTPRequestHandler):
         """選択した写真を削除する（ファイル実体・サムネイル・DB 行）。
 
         POST /api/delete {"paths": ["2026/202609/20260911_/IMG_0001.jpg", ...]}
-        paths は PHOTO_DIR からの相対パス。空になった日付フォルダは掃除する。
+        paths は PHOTO_DIR からの相対パス。"edit/<名>" は編集フォルダ内を
+        削除する（DB 行なし・サムネイルキャッシュ削除）。空になった
+        日付フォルダは掃除する。
         """
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -673,6 +686,23 @@ class Handler(BaseHTTPRequestHandler):
         for rel in rels:
             if not isinstance(rel, str):
                 errors.append({"path": str(rel), "error": "bad path"})
+                continue
+            if rel.startswith("edit/"):
+                # 編集フォルダ内のファイル（フラット配置のみ許可）
+                name = rel[len("edit/"):]
+                dst = safe_join(common.EDIT_PHOTO_DIR, name)
+                if dst is None or "/" in name:
+                    errors.append({"path": rel, "error": "bad path"})
+                    continue
+                try:
+                    if dst.is_file():
+                        dst.unlink()
+                    cache = common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp")
+                    if cache.is_file():
+                        cache.unlink()
+                    deleted.append(rel)
+                except Exception as e:  # noqa: BLE001
+                    errors.append({"path": rel, "error": str(e)})
                 continue
             src = safe_join(common.PHOTO_DIR, rel)
             if src is None:
@@ -709,6 +739,242 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     dp = dp.parent
         self.send_json({"ok": True, "deleted": deleted, "errors": errors})
+
+    # ------------------------------------------------------------------
+    # edit-photo: 編集画像フォルダ（DATA_DIR/edit-photo）
+    # ------------------------------------------------------------------
+    def api_edits(self) -> None:
+        """編集画像フォルダの一覧を写真ライクな形式で返す。
+
+        path は "edit/<ファイル名>" 仮想prefix。一覧・viewer・選択UIで
+        そのまま使える（削除は /api/delete が edit/ を受け付ける）。
+        """
+        from . import exif as exif_mod
+
+        base = common.EDIT_PHOTO_DIR
+        photos = []
+        if base.is_dir():
+            for p in sorted(base.iterdir()):
+                if not p.is_file() or p.suffix.lower() not in common.PHOTO_EXTS:
+                    continue
+                try:
+                    st = p.stat()
+                    local = datetime.fromtimestamp(st.st_mtime).astimezone()
+                except OSError:
+                    continue
+                try:
+                    size = exif_mod.image_size(p)
+                except Exception:
+                    size = None
+                photos.append({
+                    "id": f"edit:{p.name}", "path": f"edit/{p.name}",
+                    "filename": p.name,
+                    "capturedAt": local.isoformat(), "capturedLocal": local.isoformat(),
+                    "isVideo": False,
+                    "width": size[0] if size else None,
+                    "height": size[1] if size else None,
+                    "camera": None, "size": st.st_size,
+                    "thumb": f"/editthumb/{p.name}",
+                    "original": f"/editphoto/{p.name}",
+                })
+        self.send_json({"photos": photos, "count": len(photos)})
+
+    def serve_editphoto(self, rel: str) -> None:
+        p = safe_join(common.EDIT_PHOTO_DIR, rel)
+        if p is None or not p.is_file() or "/" in rel:
+            self.send_json({"error": "edit photo not found"}, 404)
+            return
+        self.send_file(p)
+
+    def _ensure_edit_thumb(self, name: str):
+        """編集画像のサムネイルを用意する（THUMB_DIR/edit 配下にキャッシュ）。"""
+        src = safe_join(common.EDIT_PHOTO_DIR, name)
+        if src is None or not src.is_file() or "/" in name:
+            return None
+        dst = common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp")
+        try:
+            if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
+                return dst
+        except OSError:
+            pass
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(src) as im:
+                im.draft("RGB", (common.THUMB_SIZE * 2, common.THUMB_SIZE * 2))
+                im = im.convert("RGB")
+                im.seek(0)
+                im.thumbnail((common.THUMB_SIZE, common.THUMB_SIZE), Image.LANCZOS)
+                im.save(dst, "WEBP", quality=82, method=4)
+            return dst
+        except Exception:
+            return None
+
+    def serve_editthumb(self, rel: str) -> None:
+        p = self._ensure_edit_thumb(unquote(rel))
+        if p is None:
+            # Pillow 無し等の場合はオリジナルをそのまま返す
+            orig = safe_join(common.EDIT_PHOTO_DIR, unquote(rel))
+            if orig is None or not orig.is_file() or "/" in unquote(rel):
+                self.send_json({"error": "thumb not found"}, 404)
+                return
+            self.send_file(orig)
+            return
+        self.send_file(p)
+
+    def _read_multipart_file(self):
+        """multipart から (fields, filename, payload) を取り出す。"""
+        from . import common as C
+
+        if (self.headers.get("Content-Type") or "").lower().startswith("application/x-www-form-urlencoded"):
+            return None, "multipart/form-data required"
+        ctype = self.headers.get("Content-Type", "")
+        m = re.search(r'boundary=([^;]+)', ctype)
+        if "multipart/form-data" not in ctype.lower() or not m:
+            return None, "multipart/form-data required"
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return None, "empty body"
+        if length > C.MAX_UPLOAD:
+            return None, "payload too large"
+        boundary = m.group(1).strip().strip('"').encode()
+        reader = _BodyReader(self.rfile, length)
+        fields, filename, payload = {}, None, None
+        for field_name, fname, part in stream_multipart(reader, boundary):
+            if fname is None:
+                if isinstance(part, str):
+                    fields[field_name] = part
+                continue
+            if filename is None and fname:
+                filename, payload = fname, part
+            elif hasattr(part, "close"):
+                part.close()
+        if payload is None:
+            return None, "file required"
+        try:
+            if payload.seek(0, 2) > C.MAX_UPLOAD:
+                return None, "too large"
+            payload.seek(0)
+        except Exception:
+            return None, "bad file"
+        return (fields, filename, payload), None
+
+    def api_edit_save(self) -> None:
+        """編集結果を編集画像フォルダへ保存する（multipart file [+ name]）。
+
+        DB 登録はしない（一覧は /api/edits がディスク走査で返す）。
+        """
+        from . import ingest
+
+        got, err = self._read_multipart_file()
+        if got is None:
+            self.send_json({"error": err}, 400)
+            return
+        fields, filename, payload = got
+        try:
+            name = ingest.sanitize_filename(fields.get("name") or filename or "edit")
+            if not Path(name).suffix:
+                name += ".jpg"
+            dest_dir = common.EDIT_PHOTO_DIR
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / name
+            n = 1
+            while dest.exists():
+                dest = dest_dir / f"{Path(name).stem}_{n}{Path(name).suffix}"
+                n += 1
+            with dest.open("wb") as out:
+                shutil.copyfileobj(payload, out, length=4 * 1024 * 1024)
+            self.send_json({"ok": True, "name": dest.name, "path": f"edit/{dest.name}"})
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": str(e)}, 500)
+        finally:
+            try:
+                payload.close()
+            except Exception:
+                pass
+
+    def api_edit_overwrite(self) -> None:
+        """編集結果で上書き保存する（multipart: path フィールド + file）。
+
+        path が edit/ で始まれば編集フォルダ内を上書き（DB なし・
+        サムネイルキャッシュ削除）。通常写真は実体を置き換えて DB
+        （サイズ・ hash・縦横・サムネイル）を更新する。
+        """
+        from . import exif as exif_mod
+        from . import ingest
+
+        got, err = self._read_multipart_file()
+        if got is None:
+            self.send_json({"error": err}, 400)
+            return
+        fields, _filename, payload = got
+        try:
+            rel = (fields.get("path") or "").strip()
+            if not rel:
+                self.send_json({"error": "path required"}, 400)
+                return
+            data = payload.read()
+            if rel.startswith("edit/"):
+                name = rel[len("edit/"):]
+                dst = safe_join(common.EDIT_PHOTO_DIR, name)
+                if dst is None or "/" in name:
+                    self.send_json({"error": "bad path"}, 400)
+                    return
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(data)
+                cache = common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp")
+                try:
+                    if cache.is_file():
+                        cache.unlink()
+                except OSError:
+                    pass
+                self.send_json({"ok": True, "path": rel})
+                return
+            dst = safe_join(common.PHOTO_DIR, rel)
+            if dst is None or not dst.is_file():
+                self.send_json({"error": "photo not found"}, 404)
+                return
+            tmp = dst.with_name(dst.name + ".edit-tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, dst)
+            conn = common.get_db()
+            try:
+                size = exif_mod.image_size(dst)
+            except Exception:
+                size = None
+            st = dst.stat()
+            conn.execute(
+                """UPDATE photos SET size=?, mtime=?, hash=?,
+                          width=?, height=?, thumb_done=0 WHERE path=?""",
+                (st.st_size, st.st_mtime, ingest.file_hash_of(dst),
+                 size[0] if size else None, size[1] if size else None, rel),
+            )
+            conn.commit()
+            # 古いサムネイルを消して即時再生成する（一覧の表示をすぐ最新化）
+            row = conn.execute("SELECT * FROM photos WHERE path=?", (rel,)).fetchone()
+            if row and row["thumb_path"]:
+                old = safe_join(common.THUMB_DIR, row["thumb_path"])
+                try:
+                    if old is not None and old.is_file():
+                        old.unlink()
+                except OSError:
+                    pass
+            if row:
+                ingest.make_thumbnail(row)
+            self.send_json({"ok": True, "path": rel})
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": str(e)}, 500)
+        finally:
+            try:
+                payload.close()
+            except Exception:
+                pass
 
     def _write_chunk(self, data: bytes) -> None:
         if data:
@@ -941,6 +1207,60 @@ main { padding: 0 8px 80px 228px; }
 }
 #prev { left: 8px; } #next { right: 8px; }
 #loading { text-align: center; color: var(--muted); padding: 24px; }
+/* ---------------- editor ---------------- */
+#editor {
+  position: fixed; inset: 0; z-index: 60; display: none;
+  background: rgba(0,0,0,.97); flex-direction: column;
+}
+#editor.open { display: flex; }
+#editor .ed-head { padding: 10px 14px; color: #ddd; font-size: 13px; flex: none; }
+#editor .ed-main { flex: 1; display: flex; gap: 10px; padding: 0 14px; min-height: 0; }
+#editor .ed-canvas-wrap {
+  flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+  background: #000; overflow: hidden; min-width: 0;
+}
+#ed-canvas { max-width: 100%; max-height: 100%; touch-action: none; cursor: crosshair; }
+#ed-cropbox {
+  position: absolute; display: none; z-index: 2; pointer-events: none;
+  border: 2px dashed var(--accent); background: rgba(76,141,255,.12);
+}
+#editor .ed-side {
+  width: 190px; flex: none; display: flex; flex-direction: column; gap: 6px; overflow-y: auto;
+}
+#editor .ed-side > button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 12px 8px; font-size: 14px; cursor: pointer;
+}
+#editor .ed-side > button.on { background: var(--accent); color: #fff; }
+#editor .ed-panel {
+  display: none; background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px; font-size: 12px; color: var(--fg);
+  flex-direction: column; gap: 8px;
+}
+#editor .ed-panel.on { display: flex; }
+#editor .ed-panel label { display: flex; align-items: center; gap: 6px; }
+#editor .ed-panel input[type="number"] {
+  width: 90px; background: #0e0f11; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font-size: 13px;
+}
+#editor .ed-panel input[type="range"] { flex: 1; }
+#editor .ed-row { display: flex; gap: 6px; flex-wrap: wrap; }
+#editor .ed-row button, #editor .ed-panel > button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+#editor .ed-row button:hover { background: #33363c; }
+#editor .ed-hint { color: var(--muted); font-size: 11px; }
+#editor .ed-savebar {
+  flex: none; display: flex; gap: 8px; justify-content: center; padding: 12px;
+}
+#editor .ed-savebar button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 9px 16px; font-size: 13px; cursor: pointer;
+}
+#editor .ed-savebar button:hover { background: #33363c; }
+#ed-overwrite { background: #1d3a24 !important; }
+#ed-tolibrary { background: #1d2f4a !important; }
 /* ---------------- header action buttons ---------------- */
 .header-actions { display: flex; gap: 6px; margin-left: auto; flex: none; }
 .header-actions button {
@@ -1012,6 +1332,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="logo"><img class="logo-icon" src="/icon/selfphotofav.png" alt=""><span class="txt">selfphoto</span><span class="ver">v.{__VERSION__}</span></div>
   <nav>
     <button id="nav-photos" class="active"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="M21 16l-5-5-9 9"/></svg></span><span class="lbl">写真</span></button>
+    <button id="nav-edits"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L20 8l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></span><span class="lbl">編集写真</span></button>
     <button id="nav-search"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></span><span class="lbl">検索</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
   </nav>
@@ -1043,10 +1364,56 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
+  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
+</div>
+<div id="editor">
+  <div class="ed-head"><span id="ed-title"></span></div>
+  <div class="ed-main">
+    <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><div id="ed-cropbox"></div></div>
+    <div class="ed-side">
+      <button data-tool="crop">トリミング</button>
+      <button data-tool="mosaic">モザイク</button>
+      <button data-tool="blur">ぼかし</button>
+      <button data-tool="resize">リサイズ</button>
+      <div class="ed-panel" id="ed-panel-crop">
+        <label><input type="radio" name="ed-ratio" value="keep" checked> 比率維持</label>
+        <label><input type="radio" name="ed-ratio" value="free"> 自由選択</label>
+        <div class="ed-row"><button id="ed-crop-apply">適用</button><button id="ed-crop-clear">クリア</button></div>
+        <div class="ed-hint">画像上でドラッグして範囲選択</div>
+      </div>
+      <div class="ed-panel" id="ed-panel-mosaic">
+        <div class="ed-hint">塗った場所にモザイク</div>
+        <label>強度 <input type="range" id="ed-mosaic-strength" min="1" max="5" step="1" value="3"><span id="ed-mosaic-strength-v">3</span></label>
+        <label>太さ <input type="range" id="ed-mosaic-size" min="1" max="5" step="1" value="3"><span id="ed-mosaic-size-v">3</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-blur">
+        <div class="ed-hint">塗った場所をぼかし</div>
+        <label>強度 <input type="range" id="ed-blur-strength" min="1" max="5" step="1" value="3"><span id="ed-blur-strength-v">3</span></label>
+        <label>太さ <input type="range" id="ed-blur-size" min="1" max="5" step="1" value="3"><span id="ed-blur-size-v">3</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-resize">
+        <div class="ed-hint">いずれか1つを入力（縦横比は維持）</div>
+        <label>長辺 <input type="number" id="ed-rs-long" min="1" max="8192" placeholder="px"></label>
+        <label>横幅 <input type="number" id="ed-rs-w" min="1" max="8192" placeholder="px"></label>
+        <label>縦幅 <input type="number" id="ed-rs-h" min="1" max="8192" placeholder="px"></label>
+        <div class="ed-hint">横幅プリセット</div>
+        <div class="ed-row">
+          <button data-w="1980">1980</button><button data-w="1280">1280</button><button data-w="1024">1024</button><button data-w="320">320</button>
+        </div>
+        <div class="ed-row"><button id="ed-rs-apply">適用</button></div>
+        <div class="ed-hint" id="ed-rs-cur"></div>
+      </div>
+    </div>
+  </div>
+  <div class="ed-savebar">
+    <button id="ed-overwrite">上書き保存</button>
+    <button id="ed-saveas">別名保存</button>
+    <button id="ed-tolibrary">編集フォルダに保存</button>
+    <button id="ed-close">閉じる</button>
+  </div>
 </div>
 <script>
 const state = { view: 'photos', month: null, term: '', offset: 0, limit: 500, done: false, photos: [], selecting: false, selected: new Set(),
@@ -1068,6 +1435,7 @@ const viewTitle = document.getElementById('view-title');
 let searchTimer = null;
 
 document.getElementById('nav-photos').onclick = () => setView('photos');
+document.getElementById('nav-edits').onclick = () => setView('edits');
 document.getElementById('nav-search').onclick = () => { setView('search'); searchBox.focus(); };
 document.getElementById('nav-upload').onclick = () => fileInput.click();
 
@@ -1075,7 +1443,7 @@ function setView(v) {
   state.view = v;
   document.querySelectorAll('#sidebar nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('nav-' + v).classList.add('active');
-  viewTitle.textContent = v === 'search' ? '検索' : '写真';
+  viewTitle.textContent = v === 'search' ? '検索' : (v === 'edits' ? '編集写真' : '写真');
   searchBox.style.display = v === 'search' ? 'block' : 'none';
   if (v === 'search') {
     if (!state.term) state.term = '';
@@ -1105,6 +1473,16 @@ async function loadMonths() {
 async function loadPhotos() {
   if (state.done) return;
   document.getElementById('loading').textContent = '読み込み中…';
+  if (state.view === 'edits') {
+    // 編集画像フォルダは全件一括（件数は少ない想定）
+    const r = await fetch('/api/edits');
+    const j = await r.json();
+    state.photos.push(...(j.photos || []));
+    state.done = true;
+    render();
+    document.getElementById('loading').textContent = '';
+    return;
+  }
   const q = new URLSearchParams({ limit: state.limit, offset: state.offset });
   if (state.view === 'search') {
     q.set('q', state.term);
@@ -1548,6 +1926,7 @@ function showLb() {
   lbContent.appendChild(el);
   document.getElementById('lb-title').textContent =
     `${p.filename}　${p.camera || ''} ${p.width||''}×${p.height||''}`;
+  document.getElementById('lb-edit').style.display = p.isVideo ? 'none' : 'block';
   history.replaceState(null, '', '#p=' + encodeURIComponent(p.path));
 }
 function moveLb(delta) {
@@ -1606,6 +1985,322 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') moveLb(1);
 });
 lb.addEventListener('click', e => { if (e.target === lb) document.getElementById('lb-close').click(); });
+
+// ---------------- editor ----------------
+// 画像編集（トリミング / モザイク / ぼかし / リサイズ）。Canvas で加工し、
+// 上書き・別名・編集フォルダのいずれかで保存する。動画は対象外。
+const edCanvas = document.getElementById('ed-canvas');
+const edCtx = edCanvas.getContext('2d', { willReadFrequently: true });
+const edWrap = document.getElementById('ed-wrap');
+const edCropBox = document.getElementById('ed-cropbox');
+const ed = { tool: null, path: '', filename: '', dirty: false, cropRect: null, cropDrag: null,
+  painting: false, lastPt: null,
+  brushSizes: [12, 24, 48, 96, 192],
+  mosaicBlocks: [4, 8, 16, 32, 64],
+  blurRadii: [2, 5, 10, 20, 40] };
+
+function openEditor() {
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  if (p.isVideo) { alert('動画の編集には対応していません'); return; }
+  ed.path = p.path; ed.filename = p.filename;
+  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null;
+  document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(x => x.classList.remove('on'));
+  document.querySelectorAll('#editor .ed-panel').forEach(x => x.classList.remove('on'));
+  edCropBox.style.display = 'none';
+  document.getElementById('ed-title').textContent = '編集中: ' + p.filename;
+  const img = new Image();
+  img.onload = () => {
+    edCanvas.width = img.naturalWidth; edCanvas.height = img.naturalHeight;
+    edCtx.drawImage(img, 0, 0);
+    updateResizeInfo();
+    document.getElementById('editor').classList.add('open');
+  };
+  img.onerror = () => alert('画像を読み込めませんでした');
+  img.src = p.original + (p.original.includes('?') ? '&' : '?') + 't=' + Date.now();
+}
+function closeEditor(force) {
+  if (!force && ed.dirty && !confirm('編集内容を破棄して閉じますか？')) return;
+  document.getElementById('editor').classList.remove('open');
+  ed.tool = null; ed.dirty = false; ed.cropRect = null;
+}
+document.getElementById('lb-edit').onclick = () => openEditor();
+document.getElementById('ed-close').onclick = () => closeEditor(false);
+
+document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
+  b.onclick = () => {
+    ed.tool = (ed.tool === b.dataset.tool) ? null : b.dataset.tool;
+    document.querySelectorAll('#editor .ed-side > button[data-tool]')
+      .forEach(x => x.classList.toggle('on', x.dataset.tool === ed.tool));
+    document.querySelectorAll('#editor .ed-panel')
+      .forEach(x => x.classList.toggle('on', x.id === 'ed-panel-' + ed.tool));
+    edCropBox.style.display = 'none'; ed.cropRect = null;
+  };
+});
+[['ed-mosaic-strength', 'ed-mosaic-strength-v'], ['ed-mosaic-size', 'ed-mosaic-size-v'],
+ ['ed-blur-strength', 'ed-blur-strength-v'], ['ed-blur-size', 'ed-blur-size-v']].forEach(([a, b]) => {
+  document.getElementById(a).addEventListener('input', e => {
+    document.getElementById(b).textContent = e.target.value;
+  });
+});
+
+// canvas 上の座標を画像ピクセル座標に変換する
+function edPos(e) {
+  const r = edCanvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * edCanvas.width / r.width,
+           y: (e.clientY - r.top) * edCanvas.height / r.height };
+}
+
+// ---------------- crop ----------------
+function cropRectOf() {
+  const d = ed.cropDrag;
+  if (!d) return null;
+  let x0 = Math.min(d.x0, d.x1), y0 = Math.min(d.y0, d.y1);
+  let w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
+  if (document.querySelector('input[name="ed-ratio"]:checked').value === 'keep') {
+    const a = edCanvas.width / edCanvas.height;
+    h = w / a;
+    y0 = (d.y1 < d.y0) ? d.y0 - h : d.y0;
+    x0 = (d.x1 < d.x0) ? d.x0 - w : d.x0;
+  }
+  x0 = Math.max(0, Math.min(edCanvas.width - 1, x0));
+  y0 = Math.max(0, Math.min(edCanvas.height - 1, y0));
+  w = Math.max(1, Math.min(w, edCanvas.width - x0));
+  h = Math.max(1, Math.min(h, edCanvas.height - y0));
+  return { x: Math.round(x0), y: Math.round(y0), w: Math.round(w), h: Math.round(h) };
+}
+function drawCropBox() {
+  const r = cropRectOf();
+  if (!r) { edCropBox.style.display = 'none'; ed.cropRect = null; return; }
+  ed.cropRect = r;
+  const cr = edCanvas.getBoundingClientRect(), wr = edWrap.getBoundingClientRect();
+  const sx = cr.width / edCanvas.width, sy = cr.height / edCanvas.height;
+  edCropBox.style.display = 'block';
+  edCropBox.style.left = (cr.left - wr.left + r.x * sx) + 'px';
+  edCropBox.style.top = (cr.top - wr.top + r.y * sy) + 'px';
+  edCropBox.style.width = (r.w * sx) + 'px';
+  edCropBox.style.height = (r.h * sy) + 'px';
+}
+document.getElementById('ed-crop-apply').onclick = () => {
+  const r = ed.cropRect;
+  if (!r || r.w < 2 || r.h < 2) { alert('範囲を選択してください'); return; }
+  const c = document.createElement('canvas');
+  c.width = r.w; c.height = r.h;
+  c.getContext('2d').drawImage(edCanvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  edCanvas.width = r.w; edCanvas.height = r.h;
+  edCtx.drawImage(c, 0, 0);
+  ed.cropRect = null; edCropBox.style.display = 'none';
+  ed.dirty = true; updateResizeInfo();
+};
+document.getElementById('ed-crop-clear').onclick = () => {
+  ed.cropDrag = null; ed.cropRect = null; edCropBox.style.display = 'none';
+};
+
+// ---------------- mosaic / blur brush ----------------
+function paintMosaic(cx, cy, radius, block) {
+  const x0 = Math.max(0, Math.floor(cx - radius)), y0 = Math.max(0, Math.floor(cy - radius));
+  const x1 = Math.min(edCanvas.width, Math.ceil(cx + radius)), y1 = Math.min(edCanvas.height, Math.ceil(cy + radius));
+  const W = x1 - x0, H = y1 - y0;
+  if (W <= 0 || H <= 0) return;
+  const img = edCtx.getImageData(x0, y0, W, H);
+  const d = img.data, w = img.width, h = img.height;
+  for (let by = 0; by < h; by += block) {
+    for (let bx = 0; bx < w; bx += block) {
+      const px = x0 + bx + block / 2 - cx, py = y0 + by + block / 2 - cy;
+      if (px * px + py * py > radius * radius) continue;
+      let r = 0, g = 0, b = 0, n = 0;
+      const xe = Math.min(bx + block, w), ye = Math.min(by + block, h);
+      for (let y = by; y < ye; y++) for (let x = bx; x < xe; x++) {
+        const i = (y * w + x) * 4;
+        r += d[i]; g += d[i + 1]; b += d[i + 2]; n++;
+      }
+      r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
+      for (let y = by; y < ye; y++) for (let x = bx; x < xe; x++) {
+        const i = (y * w + x) * 4;
+        d[i] = r; d[i + 1] = g; d[i + 2] = b;
+      }
+    }
+  }
+  edCtx.putImageData(img, x0, y0);
+}
+function paintBlur(cx, cy, radius, rad) {
+  const x0 = Math.max(0, Math.floor(cx - radius - rad)), y0 = Math.max(0, Math.floor(cy - radius - rad));
+  const x1 = Math.min(edCanvas.width, Math.ceil(cx + radius + rad)), y1 = Math.min(edCanvas.height, Math.ceil(cy + radius + rad));
+  const W = x1 - x0, H = y1 - y0;
+  if (W <= 0 || H <= 0) return;
+  const src = edCtx.getImageData(x0, y0, W, H);
+  const w = W, h = H, win = rad * 2 + 1;
+  const sp = new Uint8ClampedArray(src.data);
+  const tmp = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) {  // 水平パス
+    let r = 0, g = 0, b = 0, a = 0;
+    for (let x = -rad; x <= rad; x++) {
+      const i = (y * w + Math.min(w - 1, Math.max(0, x))) * 4;
+      r += sp[i]; g += sp[i + 1]; b += sp[i + 2]; a += sp[i + 3];
+    }
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      tmp[o] = r / win; tmp[o + 1] = g / win; tmp[o + 2] = b / win; tmp[o + 3] = a / win;
+      const io = (y * w + Math.min(w - 1, Math.max(0, x - rad))) * 4;
+      const ia = (y * w + Math.min(w - 1, Math.max(0, x + rad + 1))) * 4;
+      r += sp[ia] - sp[io]; g += sp[ia + 1] - sp[io + 1];
+      b += sp[ia + 2] - sp[io + 2]; a += sp[ia + 3] - sp[io + 3];
+    }
+  }
+  const out = src.data;
+  for (let x = 0; x < w; x++) {  // 垂直パス（円内のみ書き戻し）
+    let r = 0, g = 0, b = 0, a = 0;
+    for (let y = -rad; y <= rad; y++) {
+      const i = (Math.min(h - 1, Math.max(0, y)) * w + x) * 4;
+      r += tmp[i]; g += tmp[i + 1]; b += tmp[i + 2]; a += tmp[i + 3];
+    }
+    for (let y = 0; y < h; y++) {
+      const dx = x0 + x - cx, dy = y0 + y - cy;
+      if (dx * dx + dy * dy <= radius * radius) {
+        const o = (y * w + x) * 4;
+        out[o] = r / win; out[o + 1] = g / win; out[o + 2] = b / win; out[o + 3] = a / win;
+      }
+      const io = (Math.min(h - 1, Math.max(0, y - rad)) * w + x) * 4;
+      const ia = (Math.min(h - 1, Math.max(0, y + rad + 1)) * w + x) * 4;
+      r += tmp[ia] - tmp[io]; g += tmp[ia + 1] - tmp[io + 1];
+      b += tmp[ia + 2] - tmp[io + 2]; a += tmp[ia + 3] - tmp[io + 3];
+    }
+  }
+  edCtx.putImageData(src, x0, y0);
+}
+function paintStroke(x0, y0, x1, y1) {
+  const isM = ed.tool === 'mosaic';
+  const sizeIdx = parseInt(document.getElementById(isM ? 'ed-mosaic-size' : 'ed-blur-size').value, 10) - 1;
+  const strIdx = parseInt(document.getElementById(isM ? 'ed-mosaic-strength' : 'ed-blur-strength').value, 10) - 1;
+  const radius = ed.brushSizes[sizeIdx] / 2;
+  const dist = Math.hypot(x1 - x0, y1 - y0);
+  const steps = Math.max(1, Math.ceil(dist / Math.max(2, radius / 3)));
+  for (let i = 0; i <= steps; i++) {
+    const x = x0 + (x1 - x0) * i / steps, y = y0 + (y1 - y0) * i / steps;
+    if (isM) paintMosaic(x, y, radius, ed.mosaicBlocks[strIdx]);
+    else paintBlur(x, y, radius, ed.blurRadii[strIdx]);
+  }
+  ed.dirty = true;
+}
+edCanvas.addEventListener('pointerdown', e => {
+  if (!ed.tool) return;
+  e.preventDefault();
+  try { edCanvas.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+  const pt = edPos(e);
+  if (ed.tool === 'crop') {
+    ed.cropDrag = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+    drawCropBox();
+  } else if (ed.tool === 'mosaic' || ed.tool === 'blur') {
+    ed.painting = true; ed.lastPt = pt;
+    paintStroke(pt.x, pt.y, pt.x, pt.y);
+  }
+});
+edCanvas.addEventListener('pointermove', e => {
+  if (!ed.tool) return;
+  const pt = edPos(e);
+  if (ed.tool === 'crop' && ed.cropDrag) {
+    ed.cropDrag.x1 = pt.x; ed.cropDrag.y1 = pt.y;
+    drawCropBox();
+  } else if (ed.painting && ed.lastPt && (ed.tool === 'mosaic' || ed.tool === 'blur')) {
+    paintStroke(ed.lastPt.x, ed.lastPt.y, pt.x, pt.y);
+    ed.lastPt = pt;
+  }
+});
+edCanvas.addEventListener('pointerup', () => { ed.cropDrag = null; ed.painting = false; ed.lastPt = null; });
+edCanvas.addEventListener('pointercancel', () => { ed.cropDrag = null; ed.painting = false; ed.lastPt = null; });
+
+// ---------------- resize ----------------
+function updateResizeInfo() {
+  document.getElementById('ed-rs-cur').textContent = `現在: ${edCanvas.width}×${edCanvas.height}`;
+}
+document.querySelectorAll('#ed-panel-resize [data-w]').forEach(b => {
+  b.onclick = () => { document.getElementById('ed-rs-w').value = b.dataset.w; };
+});
+document.getElementById('ed-rs-apply').onclick = () => {
+  const L = parseInt(document.getElementById('ed-rs-long').value, 10) || 0;
+  const W = parseInt(document.getElementById('ed-rs-w').value, 10) || 0;
+  const H = parseInt(document.getElementById('ed-rs-h').value, 10) || 0;
+  const cw = edCanvas.width, ch = edCanvas.height;
+  let tw = 0, th = 0;
+  if (L > 0) { const s = L / Math.max(cw, ch); tw = Math.round(cw * s); th = Math.round(ch * s); }
+  else if (W > 0) { const s = W / cw; tw = W; th = Math.round(ch * s); }
+  else if (H > 0) { const s = H / ch; th = H; tw = Math.round(cw * s); }
+  else { alert('サイズを入力してください'); return; }
+  tw = Math.max(1, Math.min(8192, tw)); th = Math.max(1, Math.min(8192, th));
+  if (tw === cw && th === ch) return;
+  const c = document.createElement('canvas');
+  c.width = tw; c.height = th;
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(edCanvas, 0, 0, tw, th);
+  edCanvas.width = tw; edCanvas.height = th;
+  edCtx.imageSmoothingQuality = 'high';
+  edCtx.drawImage(c, 0, 0);
+  ed.dirty = true; updateResizeInfo();
+};
+
+// ---------------- editor save ----------------
+function edBlob() {
+  return new Promise((res, rej) => edCanvas.toBlob(
+    b => b ? res(b) : rej(new Error('encode failed')), 'image/jpeg', 0.92));
+}
+function edStem() {
+  const n = ed.filename || 'edit';
+  const i = n.lastIndexOf('.');
+  return i > 0 ? n.slice(0, i) : n;
+}
+document.getElementById('ed-overwrite').onclick = async () => {
+  if (!confirm(`「${ed.filename}」に上書き保存しますか？（元に戻せません）`)) return;
+  const blob = await edBlob().catch(() => null);
+  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
+  const fd = new FormData();
+  fd.append('path', ed.path);
+  fd.append('file', blob, 'edit.jpg');
+  let j = null;
+  try {
+    const r = await fetch('/api/edit-overwrite', { method: 'POST', body: fd });
+    j = await r.json();
+  } catch (err) {
+    alert('保存に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  closeEditor(true);
+  document.getElementById('lb-close').click();
+  reload();
+};
+document.getElementById('ed-saveas').onclick = async () => {
+  const blob = await edBlob().catch(() => null);
+  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
+  const name = edStem() + '_edit.jpg';
+  closeEditor(true);
+  document.getElementById('lb-close').click();
+  uploadFiles([new File([blob], name, { type: 'image/jpeg' })]);
+};
+document.getElementById('ed-tolibrary').onclick = async () => {
+  const blob = await edBlob().catch(() => null);
+  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
+  const name = edStem() + '_edit.jpg';
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('file', blob, name);
+  let j = null;
+  try {
+    const r = await fetch('/api/edit-save', { method: 'POST', body: fd });
+    j = await r.json();
+  } catch (err) {
+    alert('保存に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  alert(`編集フォルダに保存しました: ${j.name}`);
+};
 
 // infinite scroll は上の scroll ハンドラに統合
 

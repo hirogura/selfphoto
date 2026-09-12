@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.0.8 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.1.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -29,6 +29,7 @@ Web UI 左上に表示）。
 ├── photo/                      # ★写真の本体（バックアップはこのフォルダだけ）
 │   └── 2026/202609/20260911_/IMG_0001.jpg  # 年/年月/年月日_ フォルダに自動整理
 ├── thumbnail/2026/202609/20260911__IMG_0001_thumb.webp  # サムネイル（photo/ と同じ階層構造）
+├── edit-photo/                 # 編集モードで保存した画像（サイドバー「編集写真」で表示）
 └── selfphoto.db                # SQLite DB（WAL）
 ```
 
@@ -73,7 +74,7 @@ sudo ./install.sh
 3. プログラム一式を `/opt/selfphoto/program` へ配置
    （DB はデータ領域にあるため、再実行＝アップデートになる）
 4. 旧レイアウト（データ直下の年フォルダ）があれば `photo/` 配下へ自動移行
-5. `/opt/lxd-data/selfphoto-data`（DB・写真・サムネイル）を作成（既存データは保持）
+5. `/opt/lxd-data/selfphoto-data`（DB・写真・サムネイル・編集画像）を作成（既存データは保持）
 6. systemd ユニット登録 + サーバ・タイマーを有効化して起動
 7. tailscale 接続済みなら `tailscale serve --bg --https=3360` で自動公開
    （`SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1` で無効化可）
@@ -134,7 +135,8 @@ python3 -m selfphoto.ingest thumbs
 python3 -m selfphoto.server
 ```
 
-Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／アップロード、
+Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写真／検索／
+アップロード、
 左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動、
 「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
@@ -142,7 +144,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
 見ている年月フォルダを表示）、ドラッグ＆ドロップ／複数ファイル一括アップロード
 （対応形式: jpg/png/heic/webp/avif/tiff/bmp/gif と主要動画）、
  クリックで拡大（← → キーで前後移動、動画は再生。右上のボタンで
- ダウンロード／削除も可能）。
+ ダウンロード／削除も可能。写真は「編集」ボタンで編集モードに移行）。
 
 ヘッダー右のボタン:
 
@@ -154,6 +156,24 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
   場合は全ファイル選択でも 1 枚ずつダウンロード
 - **削除** : 選択した写真を削除（一覧・ファイル実体・サムネイル。確認あり）
 
+## 画像編集
+
+写真ビューアの右上「編集」ボタンで編集モードに移行（動画は対象外）。
+右側に編集ボタンを縦に表示：
+
+- **トリミング** : 画像上でドラッグして範囲選択。「比率維持」（元画像と同じ縦横比）
+  か「自由選択」。「適用」で切り抜き
+- **モザイク** : 筆ツールで塗った場所にモザイク。強度 5 段階・太さ 5 段階
+- **ぼかし** : 筆ツールで塗った場所をぼかし。強度 5 段階・太さ 5 段階
+- **リサイズ** : 長辺・横幅・縦幅のいずれかを指定（縦横比は維持）。
+  横幅プリセット 1980 / 1280 / 1024 / 320 付き
+
+保存方法（編集結果は JPEG で書き出し）：
+
+- **上書き保存** : 元ファイルを置き換え（DB・サムネイルも更新）
+- **別名保存** : 通常の取り込みとして新規登録（`元の名前_edit.jpg`）
+- **編集フォルダに保存** : `edit-photo/` に保存。サイドバー「編集写真」で表示
+
 ## 設定（環境変数）
 
 | 変数 | 既定値 | 説明 |
@@ -162,6 +182,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
 | `SELFPHPHOTO_DATA_DIR` | `/opt/lxd-data/selfphoto-data` | DB・サムネイル等のデータの置き場所 |
 | `SELFPHPHOTO_PHOTO_DIR` | `/opt/lxd-data/selfphoto-data/photo` | 写真の保存先（バックアップ対象） |
 | `SELFPHPHOTO_THUMB_DIR` | `/opt/lxd-data/selfphoto-data/thumbnail` | サムネイル保存先 |
+| `SELFPHPHOTO_EDIT_DIR` | `/opt/lxd-data/selfphoto-data/edit-photo` | 編集画像フォルダ |
 | `SELFPHPHOTO_DB` | `/opt/lxd-data/selfphoto-data/selfphoto.db` | SQLite DB |
 | `SELFPHPHOTO_HOST` | `127.0.0.1` | 待ち受けアドレス |
 | `SELFPHPHOTO_PORT` | `3360` | ポート |
@@ -174,7 +195,10 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
 - `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる）
 - `GET /api/months` — 月ごとの件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
-- `POST /api/delete` — 写真を削除（JSON `{"paths": [...]}`。ファイル実体・サムネイル・DB 行）
+- `POST /api/delete` — 写真を削除（JSON `{"paths": [...]}`。ファイル実体・サムネイル・DB 行。`edit/` prefix で編集フォルダ内も可）
+- `GET /api/edits` — 編集画像フォルダの一覧
+- `POST /api/edit-save` — 編集結果を編集フォルダに保存（multipart）
+- `POST /api/edit-overwrite` — 編集結果で上書き保存（multipart `path` + ファイル）
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
 - `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
