@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.5"
+    server_version = "selfphoto/0.9.6"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1548,35 +1548,43 @@ main { padding: 0 8px 80px 228px; }
 }
 #lightbox.open { display: flex; }
 #lb-content {
-  position: absolute; inset: 0; padding-top: 52px;
+  position: absolute; top: 0; right: 0; bottom: 0; left: 96px; padding-top: 44px;
   display: flex; overflow: auto;
 }
 #lb-content img, #lb-content video { margin: auto; flex: none; }
 #lightbox img.fit, #lightbox video {
-  max-width: calc(100vw - 16px); max-height: calc(100vh - 60px);
+  max-width: calc(100vw - 96px - 16px); max-height: calc(100vh - 52px);
   object-fit: contain;
 }
 #lightbox img.zoomed { max-width: none; max-height: none; cursor: grab; }
-#lightbox .bar {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 5;
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 10px 14px; color: #ddd; font-size: 13px;
+/* ---------------- viewer left rail ---------------- */
+#lb-rail {
+  position: fixed; left: 0; top: 0; bottom: 0; z-index: 6;
+  width: 96px; display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 8px; background: rgba(10,10,12,.88); border-right: 1px solid #222;
+}
+#lb-rail .rail-spacer { flex: 1; }
+#lb-titlebar {
+  position: fixed; top: 0; left: 96px; right: 0; z-index: 5;
+  padding: 10px 14px; color: #ddd; font-size: 13px; pointer-events: none;
   background: linear-gradient(rgba(0,0,0,.6), transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #lightbox button {
   background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
   padding: 8px 12px; font-size: 14px; cursor: pointer;
 }
-#lightbox .lb-actions { display: flex; gap: 6px; align-items: center; }
+#lb-rail button { width: 100%; padding: 10px 4px; font-size: 13px; flex: none; }
+#lb-rail button:hover { background: #33363c; }
 #lightbox button:disabled { opacity: .4; cursor: default; }
-#lb-zoom-label { color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
+#lb-zoom-label { color: var(--muted); font-size: 12px; text-align: center; }
 #lb-del { background: #5a2326; }
 #lb-del:hover { background: #752e33; }
 #lightbox .nav {
   position: fixed; top: 50%; transform: translateY(-50%); z-index: 5;
   font-size: 26px; padding: 14px 16px; opacity: .75;
 }
-#prev { left: 8px; } #next { right: 8px; }
+#prev { left: 104px; } #next { right: 8px; }
 #loading { text-align: center; color: var(--muted); padding: 24px; }
 /* ---------------- editor ---------------- */
 #editor {
@@ -1748,6 +1756,12 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar nav .nav-count, #sidebar .foot { display: none; }
   #sidebar nav button { justify-content: center; padding: 12px 0; }
   #sidebar #search-box { margin: 2px 4px; width: calc(100% - 8px); padding: 7px 4px; font-size: 16px; }
+  #lb-rail { width: 72px; padding: 10px 6px; }
+  #lb-rail button { font-size: 12px; padding: 9px 2px; }
+  #lb-titlebar { left: 72px; }
+  #lb-content { left: 72px; }
+  #lightbox img.fit, #lightbox video { max-width: calc(100vw - 72px - 8px); }
+  #prev { left: 80px; }
   main { padding-left: 66px; }
   #up-bar { left: 60px; }
   #scrubber { display: none; }
@@ -1794,7 +1808,18 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="upm-foot"><button id="upm-retry" style="display:none">失敗分を再試行</button><button id="upm-close">閉じる</button></div>
 </div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-zoom-in">拡大</button><button id="lb-zoom-out">縮小</button><span id="lb-zoom-label">100%</span><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
+  <div id="lb-rail">
+    <button id="lb-zoom-in">拡大</button>
+    <button id="lb-zoom-label" title="クリックで画面に合わせる">100%</button>
+    <button id="lb-zoom-out">縮小</button>
+    <button id="lb-copy">コピー</button>
+    <button id="lb-edit">編集</button>
+    <button id="lb-del">削除</button>
+    <button id="lb-dl">ダウンロード</button>
+    <div class="rail-spacer"></div>
+    <button id="lb-close">閉じる</button>
+  </div>
+  <div id="lb-titlebar"><span id="lb-title"></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
@@ -2775,6 +2800,12 @@ function toggleLbZoom() {
 }
 document.getElementById('lb-zoom-in').onclick = (e) => { e.stopPropagation(); stepLbZoom(1); };
 document.getElementById('lb-zoom-out').onclick = (e) => { e.stopPropagation(); stepLbZoom(-1); };
+document.getElementById('lb-zoom-label').onclick = (e) => {
+  e.stopPropagation();
+  if (!lbContent.querySelector('img')) return;
+  lbZoomIdx = LB_ZOOM_FIT; lbBaseW = 0;
+  applyLbZoom();
+};
 function moveLb(delta) {
   if (lbIndex < 0) return;
   lbIndex = (lbIndex + delta + state.photos.length) % state.photos.length;
