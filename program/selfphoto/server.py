@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.0"
+    server_version = "selfphoto/0.9.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1486,14 +1486,13 @@ main { padding: 0 8px 80px 228px; }
   background: linear-gradient(var(--bg), rgba(14,15,17,.85));
 }
 .grid {
-  display: grid; gap: 3px;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  display: flex; flex-wrap: wrap; gap: 3px;
 }
-@media (max-width: 640px) { .grid { grid-template-columns: repeat(3, 1fr); } }
 .cell {
-  position: relative; aspect-ratio: 1/1; overflow: hidden;
+  position: relative; height: 180px; flex: 0 0 auto; overflow: hidden;
   background: var(--card); border-radius: 4px; cursor: pointer;
 }
+@media (max-width: 640px) { .cell { height: 110px; } }
 .cell img {
   width: 100%; height: 100%; object-fit: cover; display: block;
   opacity: 0; transition: opacity .25s;
@@ -2416,6 +2415,12 @@ function makeCell(p) {
   const c = document.createElement('div');
   c.className = 'cell';
   c.dataset.path = p.path;
+  // DBの縦横比でセルの形を決める（横長は横長・縦長は縦長）。高さはCSSで統一。
+  // 極端なパノラマ・細長画像は崩れ防止に 0.5〜3.0 に丸める。
+  let ratio = 1;
+  if (p.width && p.height) ratio = p.width / p.height;
+  ratio = Math.min(3, Math.max(0.5, ratio));
+  c.style.aspectRatio = ratio;
   const img = document.createElement('img');
   img.loading = 'lazy';
   img.dataset.src = p.thumb || p.original;
