@@ -119,7 +119,7 @@ def thumb_rel_path(rel: str, base: str) -> str:
 def make_thumbnail(row) -> bool:
     """1 枚のサムネイルを生成する。成功したら True。"""
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except ImportError:
         # Pillow 無しでは生成できない。thumb_done=0 のままにして後で再試行させる。
         return False
@@ -131,9 +131,19 @@ def make_thumbnail(row) -> bool:
     try:
         with Image.open(src) as im:
             im.draft("RGB", (common.THUMB_SIZE * 2, common.THUMB_SIZE * 2))
-            im = im.convert("RGB")
             # WebP アニメ対策で先頭フレームのみ
-            im.seek(0)
+            try:
+                im.seek(0)
+            except Exception:
+                pass
+            # Exif Orientation を反映（縦写真は縦向きのサムネイルになる）
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+            if im is None:
+                raise ValueError("exif_transpose failed")
+            im = im.convert("RGB")
             im.thumbnail((common.THUMB_SIZE, common.THUMB_SIZE), Image.LANCZOS)
             im.save(dst, "WEBP", quality=82, method=4)
         conn = common.get_db()

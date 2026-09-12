@@ -60,6 +60,13 @@ def _pil_size(path: Path) -> tuple[int, int] | None:
     try:
         with Image.open(path) as im:
             w, h = im.size
+            # Exif Orientation が縦向き (5〜8) なら表示サイズは入れ替わる
+            try:
+                exif = im.getexif()
+                if exif and exif.get(0x0112) in (5, 6, 7, 8):
+                    w, h = h, w
+            except Exception:
+                pass
         return int(w), int(h)
     except Exception:
         return None

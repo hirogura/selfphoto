@@ -825,15 +825,25 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
         except ImportError:
             return None
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             with Image.open(src) as im:
                 im.draft("RGB", (common.THUMB_SIZE * 2, common.THUMB_SIZE * 2))
+                try:
+                    im.seek(0)
+                except Exception:
+                    pass
+                # Exif Orientation を反映（縦写真は縦向きのサムネイルになる）
+                try:
+                    im = ImageOps.exif_transpose(im)
+                except Exception:
+                    pass
+                if im is None:
+                    return None
                 im = im.convert("RGB")
-                im.seek(0)
                 im.thumbnail((common.THUMB_SIZE, common.THUMB_SIZE), Image.LANCZOS)
                 im.save(dst, "WEBP", quality=82, method=4)
             return dst
