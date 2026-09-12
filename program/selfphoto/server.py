@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.4.1"
+    server_version = "selfphoto/0.5.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1462,6 +1462,8 @@ main { padding: 0 8px 80px 228px; }
   padding: 12px 8px; font-size: 14px; cursor: pointer;
 }
 #editor .ed-side > button.on { background: var(--accent); color: #fff; }
+#editor .ed-side > button:disabled { opacity: .4; cursor: default; }
+#ed-undo { margin-top: auto; }
 #editor .ed-panel {
   display: none; background: var(--card); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px; font-size: 12px; color: var(--fg);
@@ -1644,6 +1646,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <div class="ed-row"><button id="ed-rs-apply">適用</button></div>
         <div class="ed-hint" id="ed-rs-cur"></div>
       </div>
+      <button id="ed-undo">1つ戻す</button>
     </div>
   </div>
   <div class="ed-savebar">
@@ -2524,6 +2527,7 @@ function openEditor() {
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
   ed.path = p.path; ed.filename = p.filename;
   ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null;
+  ed.history = []; updateUndoButton();
   document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(x => x.classList.remove('on'));
   document.querySelectorAll('#editor .ed-panel').forEach(x => x.classList.remove('on'));
   edCropBox.style.display = 'none';
@@ -2615,6 +2619,7 @@ document.getElementById('ed-close').onclick = () => closeEditor(false);
 function rotateEdCanvas(dir) {
   const w = edCanvas.width, h = edCanvas.height;
   if (!w || !h) return;
+  edPushHistory();
   const c = document.createElement('canvas');
   c.width = h; c.height = w;
   const ctx = c.getContext('2d');
@@ -2628,6 +2633,36 @@ function rotateEdCanvas(dir) {
 }
 document.getElementById('ed-rot-l').onclick = () => rotateEdCanvas(-1);
 document.getElementById('ed-rot-r').onclick = () => rotateEdCanvas(1);
+
+// ---------------- undo（1つ戻す） ----------------
+// 破壊的操作の直前にキャンバス全体を JPEG スナップショットとして保持する
+// （保存時と同じ 0.92 品質。モザイク等の筆操作は1ストローク=1履歴）。
+const ED_HISTORY_MAX = 20;
+function edPushHistory() {
+  try {
+    ed.history.push(edCanvas.toDataURL('image/jpeg', 0.92));
+    while (ed.history.length > ED_HISTORY_MAX) ed.history.shift();
+  } catch (err) { /* 巨大画像等で取れなければ履歴なしで続行 */ }
+  updateUndoButton();
+}
+function updateUndoButton() {
+  const b = document.getElementById('ed-undo');
+  if (b) b.disabled = !(ed.history && ed.history.length);
+}
+document.getElementById('ed-undo').onclick = () => {
+  const url = ed.history && ed.history.pop();
+  updateUndoButton();
+  if (!url) return;
+  const img = new Image();
+  img.onload = () => {
+    edCanvas.width = img.naturalWidth; edCanvas.height = img.naturalHeight;
+    edCtx.drawImage(img, 0, 0);
+    ed.cropRect = null; edCropBox.style.display = 'none';
+    ed.dirty = true; updateResizeInfo();
+  };
+  img.onerror = () => alert('1つ戻せませんでした');
+  img.src = url;
+};
 
 document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
   b.onclick = () => {
@@ -2686,6 +2721,7 @@ function drawCropBox() {
 document.getElementById('ed-crop-apply').onclick = () => {
   const r = ed.cropRect;
   if (!r || r.w < 2 || r.h < 2) { alert('範囲を選択してください'); return; }
+  edPushHistory();
   const c = document.createElement('canvas');
   c.width = r.w; c.height = r.h;
   c.getContext('2d').drawImage(edCanvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
@@ -2793,6 +2829,7 @@ edCanvas.addEventListener('pointerdown', e => {
     ed.cropDrag = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
     drawCropBox();
   } else if (ed.tool === 'mosaic' || ed.tool === 'blur') {
+    edPushHistory();
     ed.painting = true; ed.lastPt = pt;
     paintStroke(pt.x, pt.y, pt.x, pt.y);
   }
@@ -2830,6 +2867,7 @@ document.getElementById('ed-rs-apply').onclick = () => {
   else { alert('サイズを入力してください'); return; }
   tw = Math.max(1, Math.min(8192, tw)); th = Math.max(1, Math.min(8192, th));
   if (tw === cw && th === ch) return;
+  edPushHistory();
   const c = document.createElement('canvas');
   c.width = tw; c.height = th;
   const g = c.getContext('2d');
