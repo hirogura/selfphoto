@@ -251,3 +251,157 @@ def camera_model(path: Path) -> str | None:
         return model or make
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 編集保存用の EXIF 継承（JPEG のみ・標準ライブラリのみ）
+# ---------------------------------------------------------------------------
+# canvas.toBlob の出力には EXIF が含まれないため、編集保存すると撮影日時・
+# 機種情報が消える。JPEG 出力の場合のみ、元画像から日時・メーカー・モデルを
+# 引き継いだ最小限の APP1 Exif を付与する（並び順は captured_at のまま）。
+
+def _valid_exif_dt(s: str | None) -> str | None:
+    """'YYYY:MM:DD HH:MM:SS' 形式なら正規化して返す。違えば None。"""
+    if not s:
+        return None
+    try:
+        datetime.strptime(s.strip(), "%Y:%m:%d %H:%M:%S")
+        return s.strip()
+    except ValueError:
+        return None
+
+
+def edit_source_tags(path: Path) -> dict:
+    """編集保存用に元画像の EXIF（撮影日時・メーカー・モデル）を読む。
+
+    戻り値は {"datetime": "YYYY:MM:DD HH:MM:SS" | None,
+              "make": str | None, "model": str | None}。
+    """
+    out = {"datetime": None, "make": None, "model": None}
+    if not HAS_PIL:
+        return out
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return out
+            try:
+                sub = exif.get_ifd(0x8769)
+            except Exception:
+                sub = {}
+            dt = None
+            for cand in (sub.get(0x9003), sub.get(0x9004), exif.get(0x0132)):
+                dt = _valid_exif_dt(str(cand) if cand else None)
+                if dt:
+                    break
+            out["datetime"] = dt
+            out["make"] = str(exif.get(0x010F, "") or "").strip() or None
+            out["model"] = str(exif.get(0x0110, "") or "").strip() or None
+    except Exception:
+        pass
+    return out
+
+
+def local_iso_to_exif(s: str | None) -> str | None:
+    """DB の captured_local（ISO8601）を EXIF 日時形式に変換する。"""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).strftime("%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def build_exif_app1(dt_text: str, make: str | None = None,
+                    model: str | None = None) -> bytes:
+    """最小限の APP1 Exif ペイロード（b"Exif\\0\\0" + TIFF）を組み立てる。
+
+    IFD0: Make・Model・Orientation(=1)・DateTime・Exif IFD 参照。
+    Exif IFD: DateTimeOriginal・DateTimeDigitized。
+    リサイズ後の寸法タグは持たない（寸法は SOF から読まれる）。
+    """
+    dt_b = dt_text.encode("ascii") + b"\x00"
+    blobs: dict[str, bytes] = {}
+    if make:
+        blobs["make"] = make.encode("ascii", "replace").rstrip(b"\x00") + b"\x00"
+    if model:
+        blobs["model"] = model.encode("ascii", "replace").rstrip(b"\x00") + b"\x00"
+    blobs["dt0"] = dt_b
+    blobs["dt_orig"] = dt_b
+    blobs["dt_dig"] = dt_b
+    n0 = (1 if make else 0) + (1 if model else 0) + 3  # +orientation/datetime/exifptr
+    ifd0_len = 2 + 12 * n0 + 4
+    data0_len = sum(len(blobs[k]) for k in ("make", "model", "dt0") if k in blobs)
+    exif_off = 8 + ifd0_len + data0_len
+    exif_len = 2 + 12 * 2 + 4
+    off = 8 + ifd0_len
+    doff: dict[str, int] = {}
+    for k in ("make", "model", "dt0"):
+        if k in blobs:
+            doff[k] = off
+            off += len(blobs[k])
+    off = exif_off + exif_len
+    for k in ("dt_orig", "dt_dig"):
+        doff[k] = off
+        off += len(blobs[k])
+
+    tiff = bytearray(b"II*\x00" + struct.pack("<I", 8))
+    entries0 = []
+    if "make" in blobs:
+        entries0.append((0x010F, 2, len(blobs["make"]), struct.pack("<I", doff["make"])))
+    if "model" in blobs:
+        entries0.append((0x0110, 2, len(blobs["model"]), struct.pack("<I", doff["model"])))
+    entries0.append((0x0112, 3, 1, struct.pack("<H", 1) + b"\x00\x00"))
+    entries0.append((0x0132, 2, len(dt_b), struct.pack("<I", doff["dt0"])))
+    entries0.append((0x8769, 4, 1, struct.pack("<I", exif_off)))
+    tiff += struct.pack("<H", len(entries0))
+    for tag, typ, cnt, vf in entries0:
+        tiff += struct.pack("<HHI", tag, typ, cnt) + vf
+    tiff += struct.pack("<I", 0)
+    for k in ("make", "model", "dt0"):
+        if k in blobs:
+            tiff += blobs[k]
+    tiff += struct.pack("<H", 2)
+    for tag, key in ((0x9003, "dt_orig"), (0x9004, "dt_dig")):
+        tiff += (struct.pack("<HHI", tag, 2, len(dt_b))
+                 + struct.pack("<I", doff[key]))
+    tiff += struct.pack("<I", 0)
+    for k in ("dt_orig", "dt_dig"):
+        tiff += blobs[k]
+    return b"Exif\x00\x00" + bytes(tiff)
+
+
+def inject_exif_into_jpeg(path: Path, dt_text: str, make: str | None = None,
+                          model: str | None = None) -> bool:
+    """JPEG ファイルの先頭に APP1 Exif を付与・置換する。成功したら True。
+
+    JPEG 以外・日時形式が不正・書き込み失敗時は False（呼び出し側は
+    そのまま続行する）。
+    """
+    if _valid_exif_dt(dt_text) is None:
+        return False
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if data[:2] != b"\xff\xd8":
+        return False
+    try:
+        seg = build_exif_app1(dt_text.strip(), make, model)
+    except Exception:
+        return False
+    new_seg = b"\xff\xe1" + struct.pack(">H", len(seg) + 2) + seg
+    try:
+        # SOI 直後が APP1-Exif なら置換、そうでなければ挿入
+        if data[2:4] == b"\xff\xe1" and len(data) >= 12:
+            slen = struct.unpack(">H", data[4:6])[0]
+            if 8 <= slen <= len(data) - 2 and data[6:12] == b"Exif\x00\x00":
+                data = data[:2] + new_seg + data[2 + 2 + slen:]
+            else:
+                data = data[:2] + new_seg + data[2:]
+        else:
+            data = data[:2] + new_seg + data[2:]
+        path.write_bytes(data)
+        return True
+    except (OSError, struct.error):
+        return False

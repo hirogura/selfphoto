@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.1.0"
+    server_version = "selfphoto/1.1.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -292,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_edit_save()
             elif path == "/api/edit-overwrite":
                 self.api_edit_overwrite()
+            elif path == "/api/edit-saveas":
+                self.api_edit_saveas()
             elif path == "/api/rename":
                 self.api_rename()
             elif path == "/api/backup-run":
@@ -993,10 +995,13 @@ class Handler(BaseHTTPRequestHandler):
         return (fields, filename, payload), None
 
     def api_edit_save(self) -> None:
-        """編集結果を編集画像フォルダへ保存する（multipart file [+ name]）。
+        """編集結果を編集画像フォルダへ保存する（multipart file [+ name] [+ src]）。
 
+        src（編集元の path）が分かれば、JPEG の場合のみ元画像の EXIF
+        （撮影日時・メーカー・モデル）を引き継ぐ。
         DB 登録はしない（一覧は /api/edits がディスク走査で返す）。
         """
+        from . import exif as exif_mod
         from . import ingest
 
         got, err = self._read_multipart_file()
@@ -1017,6 +1022,25 @@ class Handler(BaseHTTPRequestHandler):
                 n += 1
             with dest.open("wb") as out:
                 shutil.copyfileobj(payload, out, length=4 * 1024 * 1024)
+            # 編集元の EXIF が分かれば引き継ぐ（JPEG のみ）
+            src_rel = (fields.get("src") or "").strip()
+            if src_rel:
+                if src_rel.startswith("edit/"):
+                    sname = src_rel[len("edit/"):]
+                    src_file = safe_join(common.EDIT_PHOTO_DIR, sname)
+                    if src_file is None or "/" in sname:
+                        src_file = None
+                else:
+                    src_file = safe_join(common.PHOTO_DIR, src_rel)
+                if src_file is not None and src_file.is_file():
+                    tags = exif_mod.edit_source_tags(src_file)
+                    try:
+                        head = dest.read_bytes()[:2]
+                    except OSError:
+                        head = b""
+                    if tags.get("datetime") and head == b"\xff\xd8":
+                        exif_mod.inject_exif_into_jpeg(
+                            dest, tags["datetime"], tags.get("make"), tags.get("model"))
             try:
                 from . import backup
                 backup.mark_dirty()
@@ -1059,7 +1083,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "bad path"}, 400)
                     return
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                old_tags = exif_mod.edit_source_tags(dst) if dst.is_file() else None
                 dst.write_bytes(data)
+                if old_tags and old_tags.get("datetime") and data[:2] == b"\xff\xd8":
+                    exif_mod.inject_exif_into_jpeg(
+                        dst, old_tags["datetime"], old_tags.get("make"), old_tags.get("model"))
                 cache = common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp")
                 try:
                     if cache.is_file():
@@ -1077,6 +1105,8 @@ class Handler(BaseHTTPRequestHandler):
             if dst is None or not dst.is_file():
                 self.send_json({"error": "photo not found"}, 404)
                 return
+            # 置き換え前に元画像の EXIF（撮影日時・メーカー・モデル）を読む
+            src_tags = exif_mod.edit_source_tags(dst)
             tmp = dst.with_name(dst.name + ".edit-tmp")
             tmp.write_bytes(data)
             os.replace(tmp, dst)
@@ -1104,6 +1134,19 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if row:
                 ingest.make_thumbnail(row)
+            # JPEG 出力なら EXIF（撮影日時・メーカー・モデル）を引き継ぐ。
+            # captured_at（DB）は不変なので並び順も変わらない。
+            try:
+                head = dst.read_bytes()[:2]
+            except OSError:
+                head = b""
+            if head == b"\xff\xd8":
+                dt = src_tags.get("datetime")
+                if not dt and row and row["captured_local"]:
+                    dt = exif_mod.local_iso_to_exif(row["captured_local"])
+                if dt:
+                    exif_mod.inject_exif_into_jpeg(
+                        dst, dt, src_tags.get("make"), src_tags.get("model"))
             # 古いビューア用プレビューは消す（次回表示時に遅延生成される）
             stale_view = safe_join(
                 common.VIEW_DIR, Path(rel).with_suffix("").as_posix() + "_view.webp")
@@ -1118,6 +1161,95 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self.send_json({"ok": True, "path": rel})
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": str(e)}, 500)
+        finally:
+            try:
+                payload.close()
+            except Exception:
+                pass
+
+    def api_edit_saveas(self) -> None:
+        """編集結果を元画像と同じフォルダに別名保存する
+        （multipart: path + name + file）。
+
+        写真が対象。同フォルダに name（重複時は連番）で保存し DB 登録する。
+        JPEG なら元画像の EXIF（撮影日時・メーカー・モデル）を引き継ぐため、
+        並び順は撮影日時のまま（一番上に来ない）。
+        "edit/<名>" が対象なら編集フォルダに保存する（DB 登録なし）。
+        """
+        from . import exif as exif_mod
+        from . import ingest
+
+        got, err = self._read_multipart_file()
+        if got is None:
+            self.send_json({"error": err}, 400)
+            return
+        fields, _filename, payload = got
+        try:
+            src_rel = (fields.get("path") or "").strip()
+            name = ingest.sanitize_filename(fields.get("name") or _filename or "edit")
+            if not src_rel:
+                self.send_json({"error": "path required"}, 400)
+                return
+            if "/" in name or not name:
+                self.send_json({"error": "bad name"}, 400)
+                return
+            data = payload.read()
+            if src_rel.startswith("edit/"):
+                src_name = src_rel[len("edit/"):]
+                src_file = safe_join(common.EDIT_PHOTO_DIR, src_name)
+                if src_file is None or "/" in src_name:
+                    self.send_json({"error": "bad path"}, 400)
+                    return
+                base_dir = common.EDIT_PHOTO_DIR
+                in_edit = True
+                fallback_dt = None
+            else:
+                src_file = safe_join(common.PHOTO_DIR, src_rel)
+                if src_file is None or not src_file.is_file():
+                    self.send_json({"error": "photo not found"}, 404)
+                    return
+                base_dir = src_file.parent
+                in_edit = False
+                fallback_dt = None
+                conn = common.get_db()
+                srow = conn.execute(
+                    "SELECT captured_local FROM photos WHERE path=?", (src_rel,)).fetchone()
+                if srow and srow["captured_local"]:
+                    fallback_dt = exif_mod.local_iso_to_exif(srow["captured_local"])
+            tags = (exif_mod.edit_source_tags(src_file)
+                    if src_file is not None and src_file.is_file()
+                    else {"datetime": None, "make": None, "model": None})
+            base_dir.mkdir(parents=True, exist_ok=True)
+            dest = base_dir / name
+            n = 1
+            while dest.exists():
+                dest = base_dir / f"{Path(name).stem}_{n}{Path(name).suffix}"
+                n += 1
+            dest.write_bytes(data)
+            dt = tags.get("datetime") or fallback_dt
+            if dt and data[:2] == b"\xff\xd8":
+                exif_mod.inject_exif_into_jpeg(
+                    dest, dt, tags.get("make"), tags.get("model"))
+            if in_edit:
+                try:
+                    from . import backup
+                    backup.mark_dirty()
+                except Exception:
+                    pass
+                self.send_json({"ok": True, "path": f"edit/{dest.name}",
+                                "filename": dest.name})
+                return
+            pid = ingest.finalize_upload(dest)
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
+            self.send_json({"ok": True, "id": pid,
+                            "path": dest.relative_to(common.PHOTO_DIR).as_posix(),
+                            "filename": dest.name})
         except Exception as e:  # noqa: BLE001
             self.send_json({"error": str(e)}, 500)
         finally:
@@ -3689,10 +3821,29 @@ document.getElementById('ed-overwrite').onclick = async () => {
 document.getElementById('ed-saveas').onclick = async () => {
   const out = await edEncode().catch(() => null);
   if (!out) { alert('画像の書き出しに失敗しました'); return; }
+  // 元画像と同じフォルダに別名保存する（撮影日時は EXIF で引き継がれるため
+  // 並び順は変わらない）。edit/ が元なら編集フォルダに保存される。
   const name = edStem() + '_edit' + out.ext;
+  const fd = new FormData();
+  fd.append('path', ed.path);
+  fd.append('name', name);
+  fd.append('file', out.blob, name);
+  let j = null;
+  try {
+    const r = await fetch('/api/edit-saveas', { method: 'POST', body: fd });
+    j = await r.json();
+  } catch (err) {
+    alert('保存に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
   closeEditor(true);
   document.getElementById('lb-close').click();
-  uploadFiles([new File([out.blob], name, { type: out.mime })]);
+  if (j.path && j.path.startsWith('edit/')) setView('edits');
+  else reload();
 };
 document.getElementById('ed-tolibrary').onclick = async () => {
   const out = await edEncode().catch(() => null);
@@ -3700,6 +3851,7 @@ document.getElementById('ed-tolibrary').onclick = async () => {
   const name = edStem() + '_edit' + out.ext;
   const fd = new FormData();
   fd.append('name', name);
+  fd.append('src', ed.path);
   fd.append('file', out.blob, name);
   let j = null;
   try {
