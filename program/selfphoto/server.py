@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.3"
+    server_version = "selfphoto/0.9.4"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1629,17 +1629,10 @@ main { padding: 0 8px 80px 228px; }
 #editor .ed-savebar button:hover { background: #33363c; }
 #ed-overwrite { background: #1d3a24 !important; }
 #ed-tolibrary { background: #1d2f4a !important; }
-/* ---------------- header action buttons ---------------- */
-.header-actions { display: flex; gap: 6px; margin-left: auto; flex: none; }
-.header-actions button {
-  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
-  padding: 6px 12px; font-size: 13px; cursor: pointer; flex: none;
-}
-.header-actions button:hover { background: #33363c; }
-.header-actions button.on { background: var(--accent); color: #fff; }
-#download-btn, #delete-btn { display: none; }
-#delete-btn { background: #5a2326; }
-#delete-btn:hover { background: #752e33; }
+/* ---------------- sidebar selection buttons ---------------- */
+#sidebar nav button.on { background: var(--accent); color: #fff; }
+#nav-download, #nav-delete { display: none; }
+#nav-delete .ico { color: #ff9a9a; }
 /* ---------------- selection mode ---------------- */
 .cell { position: relative; }
 .cell .sel-box {
@@ -1766,6 +1759,9 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-search"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></span><span class="lbl">検索</span></button>
     <button id="nav-backup"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">バックアップ</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
+    <button id="nav-select"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg></span><span class="lbl">複数選択</span></button>
+    <button id="nav-download"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">ダウンロード</span></button>
+    <button id="nav-delete"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg></span><span class="lbl">削除</span></button>
   </nav>
   <div class="foot">
     <div id="side-backup" title="バックアップの状態（クリックでバックアップ画面へ）">
@@ -1781,13 +1777,6 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <h1 id="view-title">写真</h1>
   <span class="count" id="count"></span>
   <input id="search-box" type="search" placeholder="ファイル名・カメラで検索…" autocomplete="off">
-  <div class="spacer"></div>
-  <div class="header-actions">
-    <button id="delete-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg> 削除</button>
-    <button id="download-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg> ダウンロード</button>
-    <button id="select-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg> 選択</button>
-    <button id="add-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg> アップロード</button>
-  </div>
 </header>
 <main>
   <div id="timeline"></div>
@@ -2391,10 +2380,11 @@ function makeHeadBox(kind, key, paths) {
 
 function refreshSelectionUi() {
   document.body.classList.toggle('selecting', state.selecting);
-  document.getElementById('select-btn').textContent = state.selecting ? '解除' : '選択';
-  document.getElementById('select-btn').classList.toggle('on', state.selecting);
-  document.getElementById('download-btn').style.display = state.selecting ? 'block' : 'none';
-  document.getElementById('delete-btn').style.display = state.selecting ? 'block' : 'none';
+  const selLbl = document.querySelector('#nav-select .lbl');
+  if (selLbl) selLbl.textContent = state.selecting ? '解除' : '複数選択';
+  document.getElementById('nav-select').classList.toggle('on', state.selecting);
+  document.getElementById('nav-download').style.display = state.selecting ? 'flex' : 'none';
+  document.getElementById('nav-delete').style.display = state.selecting ? 'flex' : 'none';
   // セルの表示更新
   document.querySelectorAll('.cell').forEach(c => {
     c.classList.toggle('selected', state.selected.has(c.dataset.path));
@@ -2471,7 +2461,7 @@ function toggleSel(p) {
 }
 
 // ---------------- header actions ----------------
-document.getElementById('select-btn').addEventListener('click', () => {
+document.getElementById('nav-select').addEventListener('click', () => {
   state.selecting = !state.selecting;
   if (!state.selecting) { state.selected.clear(); state.folderSel.clear(); state.monthSel.clear(); }
   refreshSelectionUi();
@@ -2544,7 +2534,7 @@ document.getElementById('update-btn').addEventListener('click', async () => {
   alert('サーバの復帰を確認できませんでした。時間をおいて再読み込みしてください。');
 });
 
-document.getElementById('delete-btn').addEventListener('click', async () => {
+document.getElementById('nav-delete').addEventListener('click', async () => {
   const sel = state.photos.filter(p => state.selected.has(p.path));
   if (!sel.length) { alert('削除する写真を選択してください'); return; }
   if (!confirm(`${sel.length}件を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
@@ -2581,7 +2571,7 @@ document.getElementById('delete-btn').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('download-btn').addEventListener('click', async () => {
+document.getElementById('nav-download').addEventListener('click', async () => {
   const sel = state.photos.filter(p => state.selected.has(p.path));
   if (!sel.length) { alert('ダウンロードする写真を選択してください'); return; }
   // 日付フォルダごとにグループ化（フォルダ見出しを明示チェックした場合のみ zip、
@@ -3480,7 +3470,7 @@ document.getElementById('ed-tolibrary').onclick = async () => {
 const fileInput = document.getElementById('file-input');
 const dropzone = document.getElementById('dropzone');
 // 旧 #up-bar は残置（互換用）。表示は Immich 風の #up-manager が担う。
-document.getElementById('add-btn').addEventListener('click', () => fileInput.click());
+// ファイル選択はサイドバーの「アップロード」ボタン（nav-upload）が開く。
 fileInput.addEventListener('change', () => { uploadFiles([...fileInput.files]); fileInput.value = ''; });
 
 let dragDepth = 0;
