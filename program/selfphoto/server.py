@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.3.0"
+    server_version = "selfphoto/0.4.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1605,6 +1605,8 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="ed-main">
     <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><div id="ed-cropbox"></div></div>
     <div class="ed-side">
+      <button id="ed-rot-l">左回転</button>
+      <button id="ed-rot-r">右回転</button>
       <button data-tool="crop">トリミング</button>
       <button data-tool="mosaic">モザイク</button>
       <button data-tool="blur">ぼかし</button>
@@ -2601,6 +2603,26 @@ function flashLbTitle(msg) {
   setTimeout(() => { t.textContent = orig; }, 1500);
 }
 document.getElementById('ed-close').onclick = () => closeEditor(false);
+
+// ---------------- rotate ----------------
+// 押すたびにキャンバスごと90度回転する（左回転=反時計回り、右回転=時計回り）。
+// 保存（上書き・別名・編集フォルダ）には回転後の内容が使われる。
+function rotateEdCanvas(dir) {
+  const w = edCanvas.width, h = edCanvas.height;
+  if (!w || !h) return;
+  const c = document.createElement('canvas');
+  c.width = h; c.height = w;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width / 2, c.height / 2);
+  ctx.rotate(dir * Math.PI / 2);
+  ctx.drawImage(edCanvas, -w / 2, -h / 2);
+  edCanvas.width = h; edCanvas.height = w;
+  edCtx.drawImage(c, 0, 0);
+  ed.cropRect = null; edCropBox.style.display = 'none';
+  ed.dirty = true; updateResizeInfo();
+}
+document.getElementById('ed-rot-l').onclick = () => rotateEdCanvas(-1);
+document.getElementById('ed-rot-r').onclick = () => rotateEdCanvas(1);
 
 document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
   b.onclick = () => {
