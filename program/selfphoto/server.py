@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.2.3"
+    server_version = "selfphoto/0.3.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1401,9 +1401,16 @@ main { padding: 0 8px 80px 228px; }
   align-items: center; justify-content: center;
 }
 #lightbox.open { display: flex; }
-#lightbox img, #lightbox video {
-  max-width: 100%; max-height: 100%; object-fit: contain;
+#lb-content {
+  position: absolute; inset: 0; padding-top: 52px;
+  display: flex; overflow: auto;
 }
+#lb-content img, #lb-content video { margin: auto; flex: none; }
+#lightbox img.fit, #lightbox video {
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 60px);
+  object-fit: contain;
+}
+#lightbox img.zoomed { max-width: none; max-height: none; cursor: grab; }
 #lightbox .bar {
   position: fixed; top: 0; left: 0; right: 0;
   display: flex; justify-content: space-between; align-items: center;
@@ -1414,7 +1421,9 @@ main { padding: 0 8px 80px 228px; }
   background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
   padding: 8px 12px; font-size: 14px; cursor: pointer;
 }
-#lightbox .lb-actions { display: flex; gap: 6px; }
+#lightbox .lb-actions { display: flex; gap: 6px; align-items: center; }
+#lightbox button:disabled { opacity: .4; cursor: default; }
+#lb-zoom-label { color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
 #lb-del { background: #5a2326; }
 #lb-del:hover { background: #752e33; }
 #lightbox .nav {
@@ -1586,7 +1595,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
+  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-zoom-out">縮小</button><button id="lb-zoom-in">拡大</button><span id="lb-zoom-label">100%</span><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
@@ -2363,6 +2372,8 @@ function showLb() {
   if (!p) return;
   lb.classList.add('open');
   lbContent.innerHTML = '';
+  lbZoomIdx = LB_ZOOM_FIT; lbBaseW = 0;
+  applyLbZoomButtons();
   let el;
   if (p.isVideo) {
     el = document.createElement('video');
@@ -2370,6 +2381,9 @@ function showLb() {
     el.src = p.original;
   } else {
     el = document.createElement('img');
+    el.className = 'fit';
+    el.onload = () => applyLbZoom();
+    el.ondblclick = () => toggleLbZoom();
     el.src = p.original;
   }
   lbContent.appendChild(el);
@@ -2377,8 +2391,54 @@ function showLb() {
     `${p.filename}　${p.camera || ''} ${p.width||''}×${p.height||''}`;
   document.getElementById('lb-edit').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-copy').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-zoom-in').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-zoom-out').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-zoom-label').style.display = p.isVideo ? 'none' : 'block';
   history.replaceState(null, '', '#p=' + encodeURIComponent(p.path));
 }
+// ---------------- viewer zoom ----------------
+// デフォルトは画面内に収まる縮小表示(fit)。拡大・縮小ボタンで段階ズームし、
+// はみ出した分はスクロールで見られる。写真を替えると fit に戻る。
+const LB_ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+const LB_ZOOM_FIT = 3;
+let lbZoomIdx = LB_ZOOM_FIT, lbBaseW = 0;
+function applyLbZoomButtons() {
+  const zin = document.getElementById('lb-zoom-in');
+  const zout = document.getElementById('lb-zoom-out');
+  const zlab = document.getElementById('lb-zoom-label');
+  if (zin) zin.disabled = lbZoomIdx >= LB_ZOOM_STEPS.length - 1;
+  if (zout) zout.disabled = lbZoomIdx <= 0;
+  if (zlab) zlab.textContent = Math.round(LB_ZOOM_STEPS[lbZoomIdx] * 100) + '%';
+}
+function applyLbZoom() {
+  const img = lbContent.querySelector('img');
+  if (!img || !img.naturalWidth) { applyLbZoomButtons(); return; }
+  const f = LB_ZOOM_STEPS[lbZoomIdx];
+  if (f === 1) {
+    img.classList.add('fit'); img.classList.remove('zoomed');
+    img.style.width = ''; img.style.height = '';
+  } else {
+    if (!lbBaseW) lbBaseW = img.clientWidth || img.naturalWidth;
+    img.classList.remove('fit'); img.classList.add('zoomed');
+    img.style.width = Math.max(1, Math.round(lbBaseW * f)) + 'px';
+    img.style.height = 'auto';
+  }
+  applyLbZoomButtons();
+}
+function stepLbZoom(dir) {
+  if (!lbContent.querySelector('img')) return;
+  const next = Math.min(LB_ZOOM_STEPS.length - 1, Math.max(0, lbZoomIdx + dir));
+  if (next === lbZoomIdx) return;
+  lbZoomIdx = next;
+  applyLbZoom();
+}
+function toggleLbZoom() {
+  if (!lbContent.querySelector('img')) return;
+  lbZoomIdx = (lbZoomIdx === LB_ZOOM_FIT) ? LB_ZOOM_FIT + 2 : LB_ZOOM_FIT;
+  applyLbZoom();
+}
+document.getElementById('lb-zoom-in').onclick = (e) => { e.stopPropagation(); stepLbZoom(1); };
+document.getElementById('lb-zoom-out').onclick = (e) => { e.stopPropagation(); stepLbZoom(-1); };
 function moveLb(delta) {
   if (lbIndex < 0) return;
   lbIndex = (lbIndex + delta + state.photos.length) % state.photos.length;
@@ -2433,6 +2493,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') document.getElementById('lb-close').click();
   if (e.key === 'ArrowLeft') moveLb(-1);
   if (e.key === 'ArrowRight') moveLb(1);
+  if (e.key === '+' || e.key === '=') stepLbZoom(1);
+  if (e.key === '-') stepLbZoom(-1);
 });
 lb.addEventListener('click', e => { if (e.target === lb) document.getElementById('lb-close').click(); });
 
