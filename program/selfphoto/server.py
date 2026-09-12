@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.8"
+    server_version = "selfphoto/0.9.9"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1870,6 +1870,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <div class="ed-hint">いずれか1つを入力（縦横比は維持）</div>
         <label>長辺 <input type="number" id="ed-rs-long" min="1" max="8192" placeholder="px"></label>
         <label>横幅 <input type="number" id="ed-rs-w" min="1" max="8192" placeholder="px"></label>
+        <div class="ed-row" style="justify-content:flex-end"><button id="ed-rs-swap" title="横幅と縦幅を入れ替え">⇄</button></div>
         <label>縦幅 <input type="number" id="ed-rs-h" min="1" max="8192" placeholder="px"></label>
         <div class="ed-hint">横幅プリセット</div>
         <div class="ed-row">
@@ -3410,6 +3411,13 @@ function updateResizeInfo() {
 document.querySelectorAll('#ed-panel-resize [data-w]').forEach(b => {
   b.onclick = () => { document.getElementById('ed-rs-w').value = b.dataset.w; };
 });
+document.getElementById('ed-rs-swap').onclick = () => {
+  const wEl = document.getElementById('ed-rs-w');
+  const hEl = document.getElementById('ed-rs-h');
+  const tmp = wEl.value;
+  wEl.value = hEl.value;
+  hEl.value = tmp;
+};
 document.getElementById('ed-rs-apply').onclick = () => {
   const L = parseInt(document.getElementById('ed-rs-long').value, 10) || 0;
   const W = parseInt(document.getElementById('ed-rs-w').value, 10) || 0;
