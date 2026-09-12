@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.4.0"
+    server_version = "selfphoto/0.4.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -556,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
         month = q.get("month", [None])[0]
         conn = common.get_db()
         sql = ("SELECT id, path, filename, captured_at, captured_local, is_video,"
-               " width, height, camera, size, thumb_done FROM photos")
+               " width, height, camera, size, mtime, thumb_done FROM photos")
         params: list = []
         if month and re.match(r"^\d{6}$", month):
             sql += " WHERE month=?"
@@ -568,7 +568,11 @@ class Handler(BaseHTTPRequestHandler):
         base_url = os.environ.get("SELFPHPHOTO_PUBLIC_URL", "").rstrip("/")
         for r in rows:
             rel = r["path"]
-            thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp" if r["thumb_done"] == 1 else None
+            # mtime をクエリに付けてキャッシュバスティングする。
+            # 上書き保存後は同じURLだとブラウザのキャッシュ(86400秒)が
+            # 古い画像を出し続けるため。
+            v = int(r["mtime"] or 0)
+            thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp?v={v}" if r["thumb_done"] == 1 else None
             if base_url:
                 thumb = base_url + thumb if thumb else None
             photos.append({
@@ -583,7 +587,7 @@ class Handler(BaseHTTPRequestHandler):
                 "camera": r["camera"],
                 "size": r["size"],
                 "thumb": thumb,
-                "original": f"/photo/{rel}",
+                "original": f"/photo/{rel}?v={v}",
             })
         self.send_json({"photos": photos, "count": len(photos)})
 
@@ -601,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
         conn = common.get_db()
         rows = conn.execute(
             "SELECT id, path, filename, captured_at, captured_local, is_video,"
-            " width, height, camera, size, thumb_done FROM photos"
+            " width, height, camera, size, mtime, thumb_done FROM photos"
             " WHERE filename LIKE ? OR camera LIKE ? OR path LIKE ?"
             " ORDER BY captured_at DESC, id DESC LIMIT ? OFFSET ?",
             (like, like, like, limit, offset),
@@ -609,13 +613,14 @@ class Handler(BaseHTTPRequestHandler):
         photos = []
         for r in rows:
             rel = r["path"]
-            thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp" if r["thumb_done"] == 1 else None
+            v = int(r["mtime"] or 0)
+            thumb = f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp?v={v}" if r["thumb_done"] == 1 else None
             photos.append({
                 "id": r["id"], "path": rel, "filename": r["filename"],
                 "capturedAt": r["captured_at"], "capturedLocal": r["captured_local"],
                 "isVideo": bool(r["is_video"]), "width": r["width"], "height": r["height"],
                 "camera": r["camera"], "size": r["size"], "thumb": thumb,
-                "original": f"/photo/{rel}",
+                "original": f"/photo/{rel}?v={v}",
             })
         self.send_json({"photos": photos, "count": len(photos)})
 
@@ -794,8 +799,8 @@ class Handler(BaseHTTPRequestHandler):
                     "width": size[0] if size else None,
                     "height": size[1] if size else None,
                     "camera": None, "size": st.st_size,
-                    "thumb": f"/editthumb/{p.name}",
-                    "original": f"/editphoto/{p.name}",
+                    "thumb": f"/editthumb/{p.name}?v={int(st.st_mtime)}",
+                    "original": f"/editphoto/{p.name}?v={int(st.st_mtime)}",
                 })
         self.send_json({"photos": photos, "count": len(photos)})
 
