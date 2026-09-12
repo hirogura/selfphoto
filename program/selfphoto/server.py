@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.8.0"
+    server_version = "selfphoto/0.9.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -371,9 +371,9 @@ class Handler(BaseHTTPRequestHandler):
                     except (TypeError, ValueError):
                         fallback_ts = None
                 try:
-                    dest = ingest.save_upload(filename, payload, fallback_ts=fallback_ts)
+                    dest, duplicate = ingest.save_upload(filename, payload, fallback_ts=fallback_ts)
                     pid = ingest.finalize_upload(dest, fallback_ts=fallback_ts)
-                    results.append({"name": filename, "path": dest.relative_to(C.PHOTO_DIR).as_posix(), "id": pid})
+                    results.append({"name": filename, "path": dest.relative_to(C.PHOTO_DIR).as_posix(), "id": pid, "duplicate": bool(duplicate)})
                 except Exception as e:  # noqa: BLE001
                     errors.append({"name": filename, "error": str(e)})
                 finally:
@@ -387,7 +387,9 @@ class Handler(BaseHTTPRequestHandler):
                 backup.mark_dirty()
             except Exception:
                 pass
-        self.send_json({"ok": True, "count": len(results), "results": results, "errors": errors})
+        self.send_json({"ok": True, "count": len(results),
+                        "duplicates": sum(1 for r in results if r.get("duplicate")),
+                        "results": results, "errors": errors})
 
     def route(self) -> None:
         parsed = urlparse(self.path)
@@ -1683,6 +1685,67 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 #up-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 #up-track { height: 6px; background: #26282d; border-radius: 3px; overflow: hidden; }
 #up-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+/* ---------------- upload manager (Immich 風の逐次表示) ---------------- */
+#up-manager {
+  position: fixed; right: 12px; bottom: 12px; z-index: 96;
+  width: 380px; max-width: calc(100vw - 24px);
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.55);
+  display: none; overflow: hidden;
+}
+#up-manager.on { display: block; }
+#up-manager .upm-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; font-size: 13px; font-weight: 700;
+  border-bottom: 1px solid var(--line); cursor: pointer; user-select: none;
+}
+#up-manager .upm-head .upm-count { color: var(--muted); font-weight: 400; font-size: 12px; }
+#up-manager .upm-head-btns { margin-left: auto; display: flex; gap: 4px; }
+#up-manager .upm-head-btns button {
+  background: none; border: 0; color: var(--muted); font-size: 15px;
+  cursor: pointer; padding: 2px 8px; border-radius: 6px; line-height: 1.2;
+}
+#up-manager .upm-head-btns button:hover { background: var(--chip); color: var(--fg); }
+#up-manager .upm-overall { padding: 10px 12px 6px; }
+#up-manager .upm-track { height: 6px; background: #26282d; border-radius: 3px; overflow: hidden; }
+#up-manager .upm-track > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#up-manager .upm-track.err > div { background: #e06868; }
+#up-manager .upm-track.done > div { background: #7ee2a8; }
+#upm-summary { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+#upm-list { max-height: 42vh; overflow-y: auto; padding: 2px 0 4px; }
+#up-manager.min #upm-list, #up-manager.min .upm-foot { display: none; }
+.upm-item { display: flex; gap: 10px; align-items: center; padding: 7px 12px; font-size: 12px; }
+.upm-item + .upm-item { border-top: 1px solid var(--line); }
+.upm-item img.th {
+  width: 40px; height: 40px; object-fit: cover; border-radius: 6px;
+  background: #26282d; flex: none;
+}
+.upm-item .upm-info { flex: 1; min-width: 0; }
+.upm-item .upm-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 12px; color: var(--fg);
+}
+.upm-item .upm-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.upm-item .upm-bar { height: 4px; background: #26282d; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+.upm-item .upm-bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.upm-item[data-st="done"] .upm-bar > div { background: #7ee2a8; }
+.upm-item[data-st="skipped"] .upm-bar > div { background: #9aa0a6; }
+.upm-item[data-st="error"] .upm-bar > div, .upm-item[data-st="cancelled"] .upm-bar > div { background: #e06868; }
+.upm-item .upm-st { flex: none; font-size: 11px; color: var(--muted); min-width: 64px; text-align: right; }
+.upm-item[data-st="done"] .upm-st { color: #7ee2a8; }
+.upm-item[data-st="skipped"] .upm-st { color: #9aa0a6; }
+.upm-item[data-st="error"] .upm-st { color: #ff9a9a; }
+.upm-item[data-st="uploading"] .upm-st, .upm-item[data-st="processing"] .upm-st { color: var(--fg); }
+#up-manager .upm-foot {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 8px 12px 12px;
+}
+#up-manager .upm-foot button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 7px 14px; font-size: 12px; cursor: pointer;
+}
+#up-manager .upm-foot button:hover { background: #33363c; }
+#up-manager .upm-foot button:disabled { opacity: .4; cursor: default; }
 @media (max-width: 760px) {
   #sidebar { width: 60px; padding: 14px 6px; }
   #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar .foot { display: none; }
@@ -1736,6 +1799,12 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <input type="file" id="file-input" multiple accept="image/*,video/*" style="display:none">
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
+<div id="up-manager">
+  <div class="upm-head" id="upm-head"><span id="upm-title">アップロード</span><span class="upm-count" id="upm-count"></span><span class="upm-head-btns"><button id="upm-min" title="最小化/展開">–</button><button id="upm-cancel" title="キャンセル">✕</button></span></div>
+  <div class="upm-overall"><div class="upm-track" id="upm-track"><div id="upm-fill"></div></div><div id="upm-summary"></div></div>
+  <div id="upm-list"></div>
+  <div class="upm-foot"><button id="upm-retry" style="display:none">失敗分を再試行</button><button id="upm-close">閉じる</button></div>
+</div>
 <div id="lightbox">
   <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-zoom-in">拡大</button><button id="lb-zoom-out">縮小</button><span id="lb-zoom-label">100%</span><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
@@ -3359,9 +3428,7 @@ document.getElementById('ed-tolibrary').onclick = async () => {
 // ---------------- upload (file picker + drag & drop) ----------------
 const fileInput = document.getElementById('file-input');
 const dropzone = document.getElementById('dropzone');
-const upBar = document.getElementById('up-bar');
-const upLabel = document.getElementById('up-label');
-const upFill = document.getElementById('up-fill');
+// 旧 #up-bar は残置（互換用）。表示は Immich 風の #up-manager が担う。
 document.getElementById('add-btn').addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => { uploadFiles([...fileInput.files]); fileInput.value = ''; });
 
@@ -3402,43 +3469,303 @@ window.addEventListener('drop', e => {
   }
 });
 
-const CHUNK = 5;
-let uploading = false;
-
+const UPM_PARALLEL = 3;
+const upm = { items: [], running: false, cancelled: false, active: 0,
+  startedAt: 0, lastT: 0, lastSent: 0, speed: 0 };
+const upmBox = document.getElementById('up-manager');
+const upmList = document.getElementById('upm-list');
+const upmFill = document.getElementById('upm-fill');
+const upmTrack = document.getElementById('upm-track');
+const upmSummary = document.getElementById('upm-summary');
+const upmCount = document.getElementById('upm-count');
+const upmTitle = document.getElementById('upm-title');
+const upmRetry = document.getElementById('upm-retry');
+function fmtBytes(n) {
+  if (!n && n !== 0) return '-';
+  if (n < 1024) return `${n} B`;
+  const u = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${u[i]}`;
+}
+function fmtSpeed(bps) {
+  if (!bps || bps <= 0) return '';
+  return fmtBytes(Math.round(bps)) + '/s';
+}
+function fmtEta(sec) {
+  if (!isFinite(sec) || sec < 0) return '';
+  if (sec < 60) return `残り約${Math.ceil(sec)}秒`;
+  const m = Math.floor(sec / 60), s = Math.ceil(sec % 60);
+  return m < 60 ? `残り約${m}分${s}秒` : `残り約${Math.floor(m / 60)}時間${m % 60}分`;
+}
+function upmRow(item) {
+  let row = upmList.querySelector(`[data-id="${item.id}"]`);
+  if (row) return row;
+  row = document.createElement('div');
+  row.className = 'upm-item';
+  row.dataset.id = item.id;
+  row.dataset.st = item.status;
+  const th = document.createElement('img');
+  th.className = 'th';
+  th.alt = '';
+  if (item.previewUrl) th.src = item.previewUrl;
+  const info = document.createElement('div');
+  info.className = 'upm-info';
+  const nm = document.createElement('div');
+  nm.className = 'upm-name';
+  nm.textContent = item.name;
+  nm.title = item.name;
+  const sub = document.createElement('div');
+  sub.className = 'upm-sub';
+  const bar = document.createElement('div');
+  bar.className = 'upm-bar';
+  const fill = document.createElement('div');
+  bar.appendChild(fill);
+  info.appendChild(nm); info.appendChild(sub); info.appendChild(bar);
+  const st = document.createElement('div');
+  st.className = 'upm-st';
+  row.appendChild(th); row.appendChild(info); row.appendChild(st);
+  upmList.appendChild(row);
+  return row;
+}
+function upmPaintItem(item) {
+  const row = upmRow(item);
+  row.dataset.st = item.status;
+  const fill = row.querySelector('.upm-bar > div');
+  const st = row.querySelector('.upm-st');
+  const sub = row.querySelector('.upm-sub');
+  const pct = item.size > 0 ? Math.min(100, Math.round(item.loaded / item.size * 100)) : (item.status === 'done' ? 100 : 0);
+  fill.style.width = `${item.status === 'queued' ? 0 : (item.status === 'processing' ? 100 : pct)}%`;
+  if (item.status === 'queued') { st.textContent = '待機中'; sub.textContent = fmtBytes(item.size); }
+  else if (item.status === 'uploading') { st.textContent = `${pct}%`; sub.textContent = `${fmtBytes(item.loaded)} / ${fmtBytes(item.size)}`; }
+  else if (item.status === 'processing') { st.textContent = '処理中…'; sub.textContent = `${fmtBytes(item.size)} 送信済み`; }
+  else if (item.status === 'done') { st.textContent = '完了'; sub.textContent = fmtBytes(item.size); }
+  else if (item.status === 'skipped') { st.textContent = 'スキップ'; sub.textContent = '重複のためスキップ'; }
+  else if (item.status === 'error') { st.textContent = 'エラー'; sub.textContent = item.error || '失敗'; }
+  else if (item.status === 'cancelled') { st.textContent = '中止'; sub.textContent = fmtBytes(item.size); }
+}
+function upmPaintOverall() {
+  const items = upm.items;
+  const total = items.length;
+  const doneN = items.filter(x => ['done', 'skipped', 'error', 'cancelled'].includes(x.status)).length;
+  const okN = items.filter(x => x.status === 'done').length;
+  const skipN = items.filter(x => x.status === 'skipped').length;
+  const errN = items.filter(x => x.status === 'error').length;
+  const cancelN = items.filter(x => x.status === 'cancelled').length;
+  const sent = items.reduce((a, x) => a + Math.min(x.loaded, x.size), 0);
+  const all = items.reduce((a, x) => a + x.size, 0) || 1;
+  const pct = Math.min(100, Math.round(sent / all * 100));
+  upmFill.style.width = `${pct}%`;
+  upmTrack.className = 'upm-track' + (errN ? ' err' : (doneN === total && total ? ' done' : ''));
+  upmCount.textContent = total ? `${doneN} / ${total}` : '';
+  if (!total) {
+    upmTitle.textContent = 'アップロード';
+    upmSummary.textContent = '';
+    return;
+  }
+  if (upm.running) {
+    const now = Date.now();
+    const dt = (now - upm.lastT) / 1000;
+    if (dt >= 0.5 && dt > 0) {
+      upm.speed = upm.speed * 0.6 + ((sent - upm.lastSent) / dt) * 0.4;
+      upm.lastT = now; upm.lastSent = sent;
+    }
+    const activeN = items.filter(x => x.status === 'uploading' || x.status === 'processing').length;
+    const cur = items.find(x => x.status === 'uploading' || x.status === 'processing');
+    let extra = '';
+    if (upm.speed > 0 && sent < all) extra = ` ・ ${fmtSpeed(upm.speed)} ・ ${fmtEta((all - sent) / upm.speed)}`;
+    upmTitle.textContent = 'アップロード中';
+    upmSummary.textContent = `${cur ? cur.name + ' を送信中' : '送信中…'}（${doneN} / ${total} 件）${extra}`;
+    void activeN;
+  } else {
+    upmTitle.textContent = errN ? 'アップロード（エラーあり）' : 'アップロード完了';
+    const parts = [`${okN} 件追加`];
+    if (skipN) parts.push(`${skipN} 件スキップ`);
+    if (errN) parts.push(`${errN} 件エラー`);
+    if (cancelN) parts.push(`${cancelN} 件中止`);
+    const secs = Math.max(1, Math.round((Date.now() - upm.startedAt) / 1000));
+    upmSummary.textContent = `完了: ${parts.join('、')}（${secs}秒・合計${fmtBytes(all)}）`;
+  }
+  upmRetry.style.display = (!upm.running && errN) ? 'block' : 'none';
+  document.getElementById('upm-cancel').style.display = upm.running ? 'block' : 'none';
+}
+function upmPump() {
+  if (!upm.running || upm.cancelled) return;
+  while (upm.active < UPM_PARALLEL) {
+    const item = upm.items.find(x => x.status === 'queued');
+    if (!item) break;
+    upm.active++;
+    item.status = 'uploading';
+    upmPaintItem(item); upmPaintOverall();
+    upmUploadOne(item).finally(() => {
+      upm.active--;
+      upmPaintItem(item); upmPaintOverall();
+      if (upm.cancelled) { upmFinishIfIdle(); return; }
+      upmPump();
+      upmFinishIfIdle();
+    });
+  }
+  upmPaintOverall();
+}
+function upmUploadOne(item) {
+  return new Promise(resolve => {
+    const fd = new FormData();
+    fd.append('files', item.file, item.name);
+    fd.append('manifest', JSON.stringify({ [item.name]: item.file.lastModified }));
+    const xhr = new XMLHttpRequest();
+    item.xhr = xhr;
+    xhr.open('POST', '/api/upload', true);
+    xhr.timeout = 0;
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) item.loaded = e.loaded;
+      else item.loaded = Math.max(item.loaded, 0);
+      if (item.status === 'uploading') upmPaintItem(item);
+      upmPaintOverall();
+    };
+    xhr.onload = () => {
+      item.xhr = null;
+      let j = null;
+      try { j = JSON.parse(xhr.responseText); } catch (err) { /* noop */ }
+      if (xhr.status >= 200 && xhr.status < 300 && j && (j.ok || (j.results && j.results.length))) {
+        const r = (j.results || [])[0] || {};
+        item.loaded = item.size;
+        if (r.duplicate) item.status = 'skipped';
+        else item.status = 'done';
+        item.error = '';
+      } else {
+        const msg = (j && (j.error || ((j.errors || [])[0] || {}).error)) || `HTTP ${xhr.status}`;
+        item.status = 'error';
+        item.error = String(msg).slice(0, 120);
+      }
+      resolve();
+    };
+    xhr.onerror = () => {
+      item.xhr = null;
+      if (item.status !== 'cancelled') {
+        item.status = upm.cancelled ? 'cancelled' : 'error';
+        item.error = upm.cancelled ? '' : '通信エラー';
+      }
+      resolve();
+    };
+    xhr.onabort = () => {
+      item.xhr = null;
+      if (item.status !== 'done' && item.status !== 'skipped') item.status = 'cancelled';
+      resolve();
+    };
+    xhr.ontimeout = () => {
+      item.xhr = null;
+      item.status = 'error';
+      item.error = 'タイムアウト';
+      resolve();
+    };
+    // 送信完了〜応答待ちはサーバ側の保存・サムネイル生成中
+    xhr.upload.onload = () => {
+      if (item.status === 'uploading') {
+        item.loaded = item.size;
+        item.status = 'processing';
+        upmPaintItem(item); upmPaintOverall();
+      }
+    };
+    try { xhr.send(fd); }
+    catch (err) {
+      item.status = 'error';
+      item.error = String(err).slice(0, 120);
+      resolve();
+    }
+  });
+}
+function upmFinishIfIdle() {
+  const busy = upm.items.some(x => x.status === 'queued' || x.status === 'uploading' || x.status === 'processing');
+  if (upm.active > 0 || busy) return;
+  upm.running = false;
+  upm.items.forEach(x => { x.xhr = null; });
+  upmPaintOverall();
+  upm.items.forEach(upmPaintItem);
+  upmBox.classList.add('on');
+  upmBox.classList.remove('min');
+  loadMonths().catch(() => {});
+  reload();
+}
+let upmIdSeq = 0;
 async function uploadFiles(files) {
-  if (!files || !files.length || uploading) return;
+  if (!files || !files.length) return;
   const supported = [...files].filter(f =>
     /\.(jpe?g|png|heic|heif|webp|avif|tiff?|bmp|gif|mp4|mov|m4v|avi|mkv|webm|3gp|mts|m2ts|wmv)$/i.test(f.name));
   if (!supported.length) { alert('対応していないファイルです'); return; }
-  uploading = true;
-  upBar.classList.add('on');
-  const total = supported.length;
-  let done = 0, okCount = 0, errCount = 0;
-  for (let i = 0; i < total; i += CHUNK) {
-    const slice = supported.slice(i, i + CHUNK);
-    const fd = new FormData();
-    const manifest = {};
-    for (const f of slice) { fd.append('files', f, f.name); manifest[f.name] = f.lastModified; }
-    fd.append('manifest', JSON.stringify(manifest));
-    upLabel.textContent = `アップロード中… ${done + 1}−${Math.min(done + slice.length, total)} / ${total}`;
-    upFill.style.width = `${(done / total) * 100}%`;
-    try {
-      const r = await fetch('/api/upload', { method: 'POST', body: fd });
-      const j = await r.json();
-      okCount += j.count || 0;
-      errCount += (j.errors || []).length;
-    } catch (err) {
-      errCount += slice.length;
-    }
-    done += slice.length;
-    upFill.style.width = `${(done / total) * 100}%`;
-    upLabel.textContent = `アップロード中… ${done} / ${total}`;
+  const fresh = !upm.running;
+  if (fresh) {
+    upm.items.forEach(x => { if (x.previewUrl) URL.revokeObjectURL(x.previewUrl); });
+    upm.items = [];
+    upmList.innerHTML = '';
+    upm.cancelled = false;
+    upm.active = 0;
+    upm.startedAt = Date.now();
+    upm.lastT = Date.now();
+    upm.lastSent = 0;
+    upm.speed = 0;
+  } else {
+    upm.cancelled = false;
   }
-  upLabel.textContent = `完了: ${okCount} 件追加${errCount ? `, ${errCount} 件エラー` : ''}`;
-  setTimeout(() => { upBar.classList.remove('on'); upFill.style.width = '0'; }, 3500);
-  uploading = false;
-  await Promise.all([loadMonths(), reload()]);
+  for (const f of supported) {
+    const item = {
+      id: ++upmIdSeq, file: f, name: f.name || 'upload',
+      size: f.size || 0, loaded: 0, status: 'queued', error: '',
+      xhr: null, previewUrl: null,
+    };
+    try {
+      if (f.type && f.type.startsWith('image/')) item.previewUrl = URL.createObjectURL(f);
+    } catch (err) { /* プレビュー無しで続行 */ }
+    upm.items.push(item);
+    upmPaintItem(item);
+  }
+  upm.running = true;
+  upmBox.classList.add('on');
+  upmBox.classList.remove('min');
+  upmPaintOverall();
+  upmPump();
+  upmFinishIfIdle();
 }
+document.getElementById('upm-min').addEventListener('click', e => {
+  e.stopPropagation();
+  upmBox.classList.toggle('min');
+});
+document.getElementById('upm-head').addEventListener('click', () => {
+  upmBox.classList.toggle('min');
+});
+document.getElementById('upm-cancel').addEventListener('click', e => {
+  e.stopPropagation();
+  if (!upm.running) return;
+  if (!confirm('アップロードを中止しますか？（送信済みの分は保存されています）')) return;
+  upm.cancelled = true;
+  upm.items.forEach(x => {
+    if (x.status === 'queued') x.status = 'cancelled';
+    else if (x.xhr && (x.status === 'uploading' || x.status === 'processing')) {
+      try { x.xhr.abort(); } catch (err) { /* noop */ }
+    }
+    upmPaintItem(x);
+  });
+  upmPaintOverall();
+});
+document.getElementById('upm-close').addEventListener('click', () => {
+  if (upm.running) {
+    upmBox.classList.remove('on');
+    return;
+  }
+  upmBox.classList.remove('on');
+});
+upmRetry.addEventListener('click', () => {
+  const failed = upm.items.filter(x => x.status === 'error');
+  if (!failed.length) return;
+  failed.forEach(x => { x.status = 'queued'; x.loaded = 0; x.error = ''; x.xhr = null; upmPaintItem(x); });
+  upm.cancelled = false;
+  upm.running = true;
+  upm.startedAt = Date.now();
+  upm.lastT = Date.now();
+  upm.lastSent = upm.items.reduce((a, x) => a + Math.min(x.loaded, x.size), 0);
+  upmBox.classList.remove('min');
+  upmPaintOverall();
+  upmPump();
+});
 
 loadMonths();
 loadPhotos();

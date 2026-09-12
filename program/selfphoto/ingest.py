@@ -234,11 +234,12 @@ def sanitize_filename(name: str) -> str:
     return name or "upload"
 
 
-def save_upload(name: str, fh, fallback_ts: float | None = None) -> Path:
+def save_upload(name: str, fh, fallback_ts: float | None = None) -> tuple[Path, bool]:
     """アップロードを Exif 日付（無ければ fallback_ts）で日付フォルダへ保存する。
 
     同名がある場合は内容比較し、同一ならスキップ（dest を返す）、
     違えば _1, _2... 連番で保存。
+    戻り値は (保存先, 重複スキップならTrue)。
     """
     name = sanitize_filename(name)
     tmp = common.PHOTO_DIR / ".upload-tmp"
@@ -275,11 +276,12 @@ def save_upload(name: str, fh, fallback_ts: float | None = None) -> Path:
             n += 1
         if dest.exists():
             dest_tmp.unlink()  # 重複: 破棄して既存パスを返す
+            return dest, True
         else:
             dest_tmp.rename(dest)
             if ts is not None:
                 os.utime(dest, (ts, ts))  # Exif 無しファイルは mtime も合わせる
-        return dest
+        return dest, False
     except Exception:
         dest_tmp.unlink(missing_ok=True)
         raise

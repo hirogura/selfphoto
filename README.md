@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.8.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.9.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -142,8 +142,11 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
 右端のスクロールインジケータ（年月バー・クリックでジャンプ、スクロール中は
-見ている年月フォルダを表示）、ドラッグ＆ドロップ／複数ファイル一括アップロード
-（対応形式: jpg/png/heic/webp/avif/tiff/bmp/gif と主要動画）、
+ 見ている年月フォルダを表示）、ドラッグ＆ドロップ／複数ファイル一括アップロード
+（対応形式: jpg/png/heic/webp/avif/tiff/bmp/gif と主要動画。
+右下のアップロードマネージャに Immich 風の逐次表示 — ファイルごとの進捗・
+処理中・完了／スキップ（重複）／エラー、全体バー・速度・残り時間、
+キャンセル・失敗分の再試行・最小化に対応）、
  クリックで拡大（画面内に収まる縮小表示が既定。← → キーで前後移動、動画は再生。
   写真は「拡大」「縮小」ボタン（`+` / `-` キー、ダブルクリックで切替）でズーム可能。
   右上のボタンで
@@ -231,7 +234,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 
 - `GET /api/photos?limit=500&offset=0&month=202609` — 新しい順の写真リスト
 - `GET /api/search?q=キーワード` — ファイル名・カメラ名・パスの部分一致検索
-- `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる）
+- `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる。結果に `duplicate`・`duplicates` を含む）
 - `GET /api/months` — 月ごとの件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
 - `POST /api/delete` — 写真を削除（JSON `{"paths": [...]}`。ファイル実体・サムネイル・DB 行。`edit/` prefix で編集フォルダ内も可）
