@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.4"
+    server_version = "selfphoto/0.9.5"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -635,7 +635,16 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         months = [{"year": r["year"], "month": r["month"], "count": r["n"]} for r in rows]
         total = conn.execute("SELECT COUNT(*) AS n FROM photos").fetchone()["n"]
-        self.send_json({"months": months, "total": total})
+        # 編集写真フォルダの件数（/api/edits と同じ数え方）
+        edits = 0
+        try:
+            base = common.EDIT_PHOTO_DIR
+            if base.is_dir():
+                edits = sum(1 for p in base.iterdir()
+                            if p.is_file() and p.suffix.lower() in common.PHOTO_EXTS)
+        except OSError:
+            edits = 0
+        self.send_json({"months": months, "total": total, "edits": edits})
 
     # ------------------------------------------------------------------
     # files
@@ -1415,23 +1424,19 @@ body {
 #side-backup .dot.ok { background: #7ee2a8; }
 #side-backup .dot.ng { background: #ff9a9a; }
 
-/* ---------------- top bar ---------------- */
-header {
-  position: sticky; top: 0; z-index: 10;
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 16px 10px 236px; background: rgba(14,15,17,.92); backdrop-filter: blur(6px);
-  border-bottom: 1px solid #222;
+/* ---------------- main (header-less timeline) ---------------- */
+main { padding: 0 8px 80px 228px; }
+/* ---------------- sidebar extras ---------------- */
+#sidebar nav .nav-count {
+  margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 400; flex: none;
 }
-header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .3px; }
-header .count { color: var(--muted); font-size: 12px; }
-header .spacer { flex: 1; }
+#sidebar nav button.on .nav-count { color: #fff; }
 #search-box {
-  flex: 1; max-width: 340px; display: none;
-  background: var(--chip); border: 1px solid #33363c; border-radius: 10px;
-  padding: 7px 12px; color: var(--fg); font-size: 14px; outline: none;
+  display: none; margin: 2px 6px; width: calc(100% - 12px);
+  background: var(--chip); border: 1px solid #33363c; border-radius: 8px;
+  padding: 7px 10px; color: var(--fg); font-size: 13px; outline: none;
 }
 #search-box:focus { border-color: var(--accent); }
-main { padding: 0 8px 80px 228px; }
 /* ---------------- backup ---------------- */
 #backup-form { max-width: 640px; padding: 8px 4px 40px; display: flex; flex-direction: column; gap: 10px; }
 #backup-form h2 { font-size: 17px; margin: 8px 0 0; }
@@ -1481,7 +1486,7 @@ main { padding: 0 8px 80px 228px; }
 
 /* ---------------- timeline ---------------- */
 .month-head {
-  position: sticky; top: 52px; z-index: 9;
+  position: sticky; top: 0; z-index: 9;
   padding: 14px 10px 6px; font-weight: 700; font-size: 15px;
   background: linear-gradient(var(--bg), rgba(14,15,17,.85));
 }
@@ -1740,12 +1745,11 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 #up-manager .upm-foot button:disabled { opacity: .4; cursor: default; }
 @media (max-width: 760px) {
   #sidebar { width: 60px; padding: 14px 6px; }
-  #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar .foot { display: none; }
+  #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar nav .nav-count, #sidebar .foot { display: none; }
   #sidebar nav button { justify-content: center; padding: 12px 0; }
+  #sidebar #search-box { margin: 2px 4px; width: calc(100% - 8px); padding: 7px 4px; font-size: 16px; }
   main { padding-left: 66px; }
-  header { padding-left: 76px; }
   #up-bar { left: 60px; }
-  #search-box { max-width: none; }
   #scrubber { display: none; }
 }
 </style>
@@ -1754,9 +1758,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <aside id="sidebar">
   <div class="logo"><img class="logo-icon" src="/icon/selfphotofav.png" alt=""><span class="txt">selfphoto</span><span class="ver">v.{__VERSION__}</span></div>
   <nav>
-    <button id="nav-photos" class="active"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="M21 16l-5-5-9 9"/></svg></span><span class="lbl">写真</span></button>
-    <button id="nav-edits"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L20 8l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></span><span class="lbl">編集写真</span></button>
+    <button id="nav-photos" class="active"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="M21 16l-5-5-9 9"/></svg></span><span class="lbl">写真</span><span class="nav-count" id="nav-photos-count"></span></button>
+    <button id="nav-edits"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L20 8l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></span><span class="lbl">編集写真</span><span class="nav-count" id="nav-edits-count"></span></button>
     <button id="nav-search"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></span><span class="lbl">検索</span></button>
+    <input id="search-box" type="search" placeholder="ファイル名・カメラで検索…" autocomplete="off">
     <button id="nav-backup"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">バックアップ</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
     <button id="nav-select"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg></span><span class="lbl">複数選択</span></button>
@@ -1773,11 +1778,6 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   </div>
 </aside>
 <div id="restart-ov"><div class="ro-inner" id="ro-text">再起動中…</div></div>
-<header>
-  <h1 id="view-title">写真</h1>
-  <span class="count" id="count"></span>
-  <input id="search-box" type="search" placeholder="ファイル名・カメラで検索…" autocomplete="off">
-</header>
 <main>
   <div id="timeline"></div>
   <div id="loading">読み込み中…</div>
@@ -1877,7 +1877,7 @@ const fday = d => {
 
 // ---------------- sidebar navigation ----------------
 const searchBox = document.getElementById('search-box');
-const viewTitle = document.getElementById('view-title');
+const VIEW_TITLES = { photos: '写真', edits: '編集写真', search: '検索', backup: 'バックアップ' };
 let searchTimer = null;
 let backupTimer = null;
 
@@ -1893,7 +1893,7 @@ function setView(v) {
   if (backupTimer) { clearInterval(backupTimer); backupTimer = null; }
   document.querySelectorAll('#sidebar nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('nav-' + v).classList.add('active');
-  viewTitle.textContent = v === 'search' ? '検索' : (v === 'edits' ? '編集写真' : (v === 'backup' ? 'バックアップ' : '写真'));
+  document.title = 'selfphoto - ' + (VIEW_TITLES[v] || v);
   searchBox.style.display = v === 'search' ? 'block' : 'none';
   if (v === 'search') {
     if (!state.term) state.term = '';
@@ -1905,6 +1905,7 @@ function setView(v) {
     searchBox.value = '';
     reload();
   }
+  if (v !== 'backup') loadMonths();
 }
 
 searchBox.addEventListener('input', () => {
@@ -1919,7 +1920,10 @@ searchBox.addEventListener('input', () => {
 async function loadMonths() {
   const r = await fetch('/api/months');
   const j = await r.json();
-  document.getElementById('count').textContent = `${j.total} 枚`;
+  const pc = document.getElementById('nav-photos-count');
+  if (pc) pc.textContent = (j.total ?? '') === '' ? '' : `${j.total}`;
+  const ec = document.getElementById('nav-edits-count');
+  if (ec) ec.textContent = (j.edits ?? '') === '' ? '' : `${j.edits}`;
 }
 
 // ---------------- backup settings ----------------
@@ -2460,7 +2464,7 @@ function toggleSel(p) {
   refreshSelectionUi();
 }
 
-// ---------------- header actions ----------------
+// ---------------- sidebar selection ----------------
 document.getElementById('nav-select').addEventListener('click', () => {
   state.selecting = !state.selecting;
   if (!state.selecting) { state.selected.clear(); state.folderSel.clear(); state.monthSel.clear(); }
@@ -2565,6 +2569,7 @@ document.getElementById('nav-delete').addEventListener('click', async () => {
     state.monthSel = new Set([...state.monthSel].filter(m =>
       state.photos.some(p => p.path.startsWith(m))));
     render();
+    loadMonths();
   }
   if (j.errors && j.errors.length) {
     alert(`${gone.size}件を削除しました。${j.errors.length}件は失敗しました`);
@@ -2816,6 +2821,7 @@ document.getElementById('lb-del').onclick = async () => {
     showLb();
   }
   render();
+  loadMonths();
 };
 document.getElementById('prev').onclick = () => moveLb(-1);
 document.getElementById('next').onclick = () => moveLb(1);

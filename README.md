@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.9.4 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.9.5 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -137,9 +137,11 @@ python3 -m selfphoto.server
 ```
 
 Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写真／検索／
-バックアップ／アップロード、
+バックアップ／アップロード／複数選択。写真・編集写真の右に件数を表示。
+検索時はサイドバーに検索欄が現れる。
 左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動、
 「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
+上部ツールバーは無く、月見出しがそのまま先頭に吸着する
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
 右端のスクロールインジケータ（年月バー・クリックでジャンプ、スクロール中は
  見ている年月フォルダを表示）、ドラッグ＆ドロップ／複数ファイル一括アップロード
@@ -236,7 +238,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 - `GET /api/photos?limit=500&offset=0&month=202609` — 新しい順の写真リスト
 - `GET /api/search?q=キーワード` — ファイル名・カメラ名・パスの部分一致検索
 - `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる。結果に `duplicate`・`duplicates` を含む）
-- `GET /api/months` — 月ごとの件数
+- `GET /api/months` — 月ごとの件数・写真総数・編集写真件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
 - `POST /api/delete` — 写真を削除（JSON `{"paths": [...]}`。ファイル実体・サムネイル・DB 行。`edit/` prefix で編集フォルダ内も可）
 - `GET /api/edits` — 編集画像フォルダの一覧
