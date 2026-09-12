@@ -418,60 +418,77 @@ class Handler(BaseHTTPRequestHandler):
     def api_update(self) -> None:
         """GitHub から最新版を取得して install.sh で更新する。
 
-        リポジトリを一時ディレクトリに clone し、install.sh を実行する
+        clone から install.sh 実行まで丸ごと一時ユニット内で行う。
+        理由: サーバ本体は ProtectSystem=strict + PrivateTmp で動いており、
+        (1) 子プロセスのままでは /opt/selfphoto 等が read-only で書けない、
+        (2) サーバ側の /tmp はプライベート名前空間のため一時ユニットと
+        共有できない。制限なしの一時ユニット内で完結させれば両方回避できる。
         （プログラム一式の上書き・systemd ユニット再登録。写真・DB は保持）。
         systemd 環境ではレスポンス後に selfphoto-server.service を再起動して
         新しいコードを読み込ませる。
         """
-        import tempfile
+        import shlex
 
         repo = os.environ.get(
             "SELFPHPHOTO_UPDATE_REPO", "https://github.com/hirogura/selfphoto.git")
         home = os.environ.get("SELFPHPHOTO_HOME", str(common.PROGRAM_DIR.parent))
-        if not shutil.which("git"):
-            self.send_json({"ok": False, "error": "git not found"}, 500)
-            return
+        use_unit = (os.path.isdir("/run/systemd/system")
+                    and shutil.which("systemctl")
+                    and shutil.which("systemd-run")
+                    and shutil.which("git"))
         try:
-            with tempfile.TemporaryDirectory(prefix="selfphoto-update-") as tmp:
-                clone = subprocess.run(
-                    ["git", "clone", "--depth", "1", repo, "repo"],
-                    cwd=tmp, capture_output=True, text=True, timeout=300,
+            if use_unit:
+                # 一時ユニット内で clone → install.sh を実行する。
+                # 終了コード・出力は --pipe/--wait で回収する。
+                script = (
+                    "set -e\n"
+                    'TMP=$(mktemp -d /tmp/selfphoto-update-XXXXXX)\n'
+                    'trap \'rm -rf "$TMP"\' EXIT\n'
+                    f"git clone --depth 1 {shlex.quote(repo)} \"$TMP/repo\"\n"
+                    'cd "$TMP/repo"\n'
+                    "test -f install.sh\n"
+                    f"SELFPHPHOTO_HOME={shlex.quote(home)} bash ./install.sh\n"
                 )
-                if clone.returncode != 0:
+                inst = subprocess.run(
+                    ["systemd-run", "--pipe", "--wait", "--collect",
+                     "-p", "ProtectSystem=no",
+                     "bash", "-c", script],
+                    capture_output=True, text=True, timeout=900,
+                )
+                if inst.returncode != 0:
+                    tail = (inst.stdout.strip() + "\n" + inst.stderr.strip()).strip()[-2000:]
                     self.send_json({"ok": False,
-                                    "error": f"git clone failed: {clone.stderr.strip()}"}, 500)
+                                    "error": f"install.sh failed: {tail}"}, 500)
                     return
-                repo_dir = Path(tmp) / "repo"
-                installer = repo_dir / "install.sh"
-                if not installer.is_file():
-                    self.send_json({"ok": False, "error": "install.sh not found in repo"}, 500)
+            else:
+                import tempfile
+
+                if not shutil.which("git"):
+                    self.send_json({"ok": False, "error": "git not found"}, 500)
                     return
-                env = dict(os.environ, SELFPHPHOTO_HOME=home)
-                if (os.path.isdir("/run/systemd/system")
-                        and shutil.which("systemctl")
-                        and shutil.which("systemd-run")):
-                    # サーバ本体は ProtectSystem=strict 等でサンドボックス化されて
-                    # いるため、子プロセスのまま install.sh を実行しても
-                    # /opt/selfphoto 等が read-only で書けない。制限なしの一時
-                    # ユニットで実行する（終了コード・出力は --pipe/--wait で回収）。
-                    inst = subprocess.run(
-                        ["systemd-run", "--pipe", "--wait", "--collect",
-                         f"--working-directory={repo_dir}",
-                         f"--setenv=SELFPHPHOTO_HOME={home}",
-                         "-p", "ProtectSystem=no",
-                         "bash", "./install.sh"],
-                        capture_output=True, text=True, timeout=660,
+                with tempfile.TemporaryDirectory(prefix="selfphoto-update-") as tmp:
+                    clone = subprocess.run(
+                        ["git", "clone", "--depth", "1", repo, "repo"],
+                        cwd=tmp, capture_output=True, text=True, timeout=300,
                     )
-                else:
+                    if clone.returncode != 0:
+                        self.send_json({"ok": False,
+                                        "error": f"git clone failed: {clone.stderr.strip()}"}, 500)
+                        return
+                    repo_dir = Path(tmp) / "repo"
+                    if not (repo_dir / "install.sh").is_file():
+                        self.send_json({"ok": False, "error": "install.sh not found in repo"}, 500)
+                        return
+                    env = dict(os.environ, SELFPHPHOTO_HOME=home)
                     inst = subprocess.run(
                         ["bash", "install.sh"], cwd=repo_dir,
                         capture_output=True, text=True, timeout=600, env=env,
                     )
-                if inst.returncode != 0:
-                    tail = (inst.stderr.strip() or inst.stdout.strip())[-2000:]
-                    self.send_json({"ok": False,
-                                    "error": f"install.sh failed: {tail}"}, 500)
-                    return
+                    if inst.returncode != 0:
+                        tail = (inst.stderr.strip() or inst.stdout.strip())[-2000:]
+                        self.send_json({"ok": False,
+                                        "error": f"install.sh failed: {tail}"}, 500)
+                        return
         except subprocess.TimeoutExpired:
             self.send_json({"ok": False, "error": "update timed out"}, 504)
             return
