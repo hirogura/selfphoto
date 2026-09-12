@@ -47,8 +47,8 @@ Web UI 左上に表示）。
 ### 手順
 
 ```bash
-git clone <このリポジトリ>
-cd <リポジトリ>
+git clone https://github.com/hirogura/selfphoto.git
+cd selfphoto
 sudo ./install.sh
 ```
 
