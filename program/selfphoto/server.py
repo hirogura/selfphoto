@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.7.0"
+    server_version = "selfphoto/0.7.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3222,7 +3222,9 @@ document.getElementById('ed-tolibrary').onclick = async () => {
     alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
     return;
   }
-  alert(`編集フォルダに保存しました: ${j.name}`);
+  closeEditor(true);
+  document.getElementById('lb-close').click();
+  setView('edits');
 };
 
 // infinite scroll は上の scroll ハンドラに統合
