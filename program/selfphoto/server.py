@@ -678,17 +678,44 @@ class Handler(BaseHTTPRequestHandler):
     def _ensure_view(self, rel: str):
         """ビューア用プレビュー画像を用意する（VIEW_DIR 配下にキャッシュ）。
 
-        無い・または元画像より古い場合はその場で生成する。
+        rel はプレビュー側の相対パス（…_view.webp）。末尾を剥がして
+        元画像（… + 写真拡張子）を探し、無い・または元画像より古い場合は
+        その場で生成する。
         動画・生成失敗時は None（呼び出し側はオリジナルにフォールバック）。
         """
         from . import ingest
 
-        src = safe_join(common.PHOTO_DIR, rel)
-        if src is None or not src.is_file():
+        stem = rel
+        suffix = "_view" + common.VIEW_EXT
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+        if not stem or ".." in stem.split("/") or "\x00" in stem:
             return None
+        # 実ファイルの拡張子は大文字（.JPG等）の場合があるため、
+        # 親フォルダを走査して大文字小文字を無視して探す。
+        if "/" in stem:
+            dir_rel, base = stem.rsplit("/", 1)
+            parent = safe_join(common.PHOTO_DIR, dir_rel)
+        else:
+            dir_rel, base = "", stem
+            parent = common.PHOTO_DIR
+        if parent is None or not parent.is_dir():
+            return None
+        want = {base.lower() + ext for ext in common.PHOTO_EXTS}
+        src = None
+        try:
+            for p in parent.iterdir():
+                if p.is_file() and p.name.lower() in want:
+                    src = p
+                    break
+        except OSError:
+            return None
+        if src is None:
+            return None
+        orig_rel = f"{dir_rel}/{src.name}" if dir_rel else src.name
         if src.suffix.lower() in common.VIDEO_EXTS:
             return None
-        dst_rel = ingest.view_rel_path(rel)
+        dst_rel = ingest.view_rel_path(orig_rel)
         dst = safe_join(common.VIEW_DIR, dst_rel)
         if dst is None:
             return None
