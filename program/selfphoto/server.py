@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.6"
+    server_version = "selfphoto/0.9.7"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1605,6 +1605,7 @@ main { padding: 0 8px 80px 228px; }
 }
 #editor .ed-side {
   width: 190px; flex: none; display: flex; flex-direction: column; gap: 6px; overflow-y: auto;
+  order: -1;
 }
 #editor .ed-side > button {
   background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
