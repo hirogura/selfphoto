@@ -1,0 +1,10 @@
+[Unit]
+Description=Run selfphoto scan every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=selfphoto-scan.service
+
+[Install]
+WantedBy=timers.target

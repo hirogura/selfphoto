@@ -1,0 +1,22 @@
+[Unit]
+Description=selfphoto web server (port 3360, localhost only / tailscale serve)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/selfphoto/program
+ExecStart=/usr/bin/python3 -m selfphoto.server
+Restart=on-failure
+RestartSec=3
+
+# 待ち受けは 127.0.0.1 のみ（tailscale serve 経由で公開）
+Environment=SELFPHPHOTO_HOST=127.0.0.1
+Environment=SELFPHPHOTO_PORT=3360
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lxd-data/selfphoto-data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

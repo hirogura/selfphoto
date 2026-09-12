@@ -1,0 +1,83 @@
+"""selfphoto 共通設定・DB スキーマ."""
+from __future__ import annotations
+
+import os
+import sqlite3
+import threading
+from pathlib import Path
+
+VERSION = "0.0.2"
+
+# ディレクトリ設定
+# 写真・サムネイル・DB はプログラム領域 (/opt/selfphoto) と完全に分離し、
+# /opt/lxd-data 側に置く（ワークスペース外なので誤ってアップロードされない）。
+# 写真の本体は DATA_DIR/photo 配下に集約し、photo/ だけコピーすればバックアップになる。
+PROGRAM_DIR = Path(os.environ.get("SELFPHPHOTO_PROGRAM_DIR", "/opt/selfphoto/program"))
+DATA_DIR = Path(os.environ.get("SELFPHPHOTO_DATA_DIR", "/opt/lxd-data/selfphoto-data"))
+PHOTO_DIR = Path(os.environ.get("SELFPHPHOTO_PHOTO_DIR", str(DATA_DIR / "photo")))
+THUMB_DIR = Path(os.environ.get("SELFPHPHOTO_THUMB_DIR", str(DATA_DIR / "thumbnail")))
+DB_PATH = Path(os.environ.get("SELFPHPHOTO_DB", str(DATA_DIR / "selfphoto.db")))
+
+# サーバ設定
+HOST = os.environ.get("SELFPHPHOTO_HOST", "127.0.0.1")
+PORT = int(os.environ.get("SELFPHPHOTO_PORT", "3360"))
+
+# アップロード 1 リクエストの最大サイズ
+MAX_UPLOAD = int(os.environ.get("SELFPHPHOTO_MAX_UPLOAD_GB", "20")) * 1024 ** 3
+
+# 拡張子（撮影データは非対応）
+PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".avif", ".tif", ".tiff", ".bmp", ".gif"}
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts", ".wmv"}
+
+SUPPORTED_EXTS = PHOTO_EXTS | VIDEO_EXTS
+
+# サムネイルは年/年月/ベース名.webp
+THUMB_SIZE = 512
+THUMB_EXT = ".webp"
+
+_local = threading.local()
+
+
+def get_db() -> sqlite3.Connection:
+    """スレッドごとの sqlite3 接続を返す（WAL モード）。"""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
+    return conn
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS photos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    path          TEXT UNIQUE NOT NULL,       -- PHOTO_DIR からの相対パス
+    filename      TEXT NOT NULL,
+    captured_at   TEXT NOT NULL,              -- UTC ISO8601 (Exif 欠損は mtime)
+    captured_local TEXT NOT NULL,             -- ローカル ISO8601 (UI 表示・フォルダ分割用)
+    year          TEXT NOT NULL,
+    month         TEXT NOT NULL,              -- YYYYMM
+    is_video      INTEGER NOT NULL DEFAULT 0,
+    width         INTEGER,
+    height        INTEGER,
+    camera        TEXT,
+    size          INTEGER NOT NULL DEFAULT 0,
+    mtime         REAL NOT NULL DEFAULT 0,
+    hash          TEXT NOT NULL,
+    thumb_path    TEXT,
+    thumb_done    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_photos_captured ON photos(captured_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_photos_month ON photos(month);
+CREATE INDEX IF NOT EXISTS idx_photos_thumb_done ON photos(thumb_done);
+"""
+
+
+def init_db() -> None:
+    conn = get_db()
+    conn.executescript(SCHEMA)
+    conn.commit()

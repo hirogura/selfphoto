@@ -1,0 +1,16 @@
+# ===== フォルダ =====
+/selfphoto-data
+/thumbnail
+/icon
+# ===== Python =====
+venv/
+__pycache__/
+*.pyc
+
+# ===== アップデート時のバックアップ =====
+*.bak
+
+# ===== OS / エディタ =====
+.DS_Store
+Thumbs.db
+*.log

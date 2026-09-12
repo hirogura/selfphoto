@@ -1,17 +1,17 @@
 # selfphoto
 
-docker 不要のセルフホスト写真管理。Immich のような「新しい順」タイムラインを
-Tailscale 経由で公開する。（バージョン: v0.0.1 — `common.py` の `VERSION` で管理、
-Web UI 左上に表示）
+セルフホストできる写真管理ソフトです。
+Tailscale 経由で公開します（バージョン: v.0.0.2 — `common.py` の `VERSION` で管理、
+Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
-`install.sh` 1 本で、任意の Linux 環境に `/opt/selfphoto` へ導入できる。
+`install.sh` 1 本で、任意の Linux 環境に `/opt/selfphoto` へ導入できます。
 
 写真・サムネイル・DB はプログラム領域 (`/opt/selfphoto`) とは切り離し、
-`/opt/lxd-data/selfphoto-data` 配下に置く。写真データがワークスペース／配布物に
-混入して誤ってアップロードされることがないようにするため。
+`/opt/lxd-data/selfphoto-data` 配下に置いています（写真データがワークスペース／配布物に
+混入して誤ってアップロードされることがないようにするため）
 さらに写真の本体は `photo/` 配下に集約しているので、**バックアップは
-`/opt/lxd-data/selfphoto-data/photo` だけをコピーすればよい**。
+`/opt/lxd-data/selfphoto-data/photo` だけをコピーすればよいはずです**。
 
 ## 構成
 
@@ -65,7 +65,7 @@ sudo ./install.sh
 配置先を変えたい場合:
 
 ```bash
-sudo SELFPHPHOTO_HOME=/srv/selfphoto sudo -E ./install.sh
+sudo SELFPHPHOTO_HOME=/srv/selfphoto -E ./install.sh
 ```
 
 systemd の無い環境では、ユニット登録をスキップして手動起動の手順を表示する。
@@ -122,7 +122,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
 - **選択** : 選択モード。写真・日付フォルダ・月見出しの左上にチェックボックスが
   表示され、複数選択できる（見出しのチェックで配下をまとめて選択）
 - **ダウンロード** : 選択した写真をダウンロード。フォルダ内の写真をすべて
-  選択した場合はフォルダ単位で zip 固圧、それ以外は 1 枚ずつダウンロード
+  選択した場合はフォルダ単位で zip 圧縮、それ以外は 1 枚ずつダウンロード
 
 ## 設定（環境変数）
 

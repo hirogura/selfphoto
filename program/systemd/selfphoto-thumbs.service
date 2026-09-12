@@ -1,0 +1,11 @@
+[Unit]
+Description=selfphoto thumbnail generation (process pending items)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/selfphoto/program
+ExecStart=/usr/bin/python3 -m selfphoto.ingest thumbs
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lxd-data/selfphoto-data
+PrivateTmp=true

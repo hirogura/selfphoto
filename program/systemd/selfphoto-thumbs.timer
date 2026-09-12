@@ -1,0 +1,10 @@
+[Unit]
+Description=Run selfphoto thumbnail generation every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=selfphoto-thumbs.service
+
+[Install]
+WantedBy=timers.target

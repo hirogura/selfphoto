@@ -1,0 +1,11 @@
+[Unit]
+Description=selfphoto scan selfphoto-data (register new/removed files to DB)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/selfphoto/program
+ExecStart=/usr/bin/python3 -m selfphoto.ingest scan
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lxd-data/selfphoto-data
+PrivateTmp=true
