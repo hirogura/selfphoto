@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.6.0"
+    server_version = "selfphoto/0.7.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -292,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_edit_save()
             elif path == "/api/edit-overwrite":
                 self.api_edit_overwrite()
+            elif path == "/api/rename":
+                self.api_rename()
             elif path == "/api/backup-run":
                 self.api_backup_run()
             elif path == "/api/backup-watch":
@@ -1016,6 +1018,106 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def api_rename(self) -> None:
+        """ファイル名を変更する（拡張子は維持・同一フォルダ内のみ）。
+
+        POST /api/rename {"path": "2026/202609/20260911_/IMG_0001.jpg", "name": "新しい名前"}
+        name は拡張子より前の部分。DB・サムネイルも追従する。
+        "edit/<名>" は編集フォルダ内を対象にする。
+        """
+        from . import ingest
+
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        rel = body.get("path") if isinstance(body.get("path"), str) else ""
+        rel = rel.strip()
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        if not rel or not name.strip():
+            self.send_json({"error": "path and name required"}, 400)
+            return
+        # 拡張子より前の部分だけ使い、元の拡張子を維持する
+        stem = Path(ingest.sanitize_filename(name.strip())).stem.strip(" .")
+        if not stem or len(stem) > 120:
+            self.send_json({"error": "bad name"}, 400)
+            return
+        if rel.startswith("edit/"):
+            old_name = rel[len("edit/"):]
+            if not old_name or "/" in old_name:
+                self.send_json({"error": "bad path"}, 400)
+                return
+            src = safe_join(common.EDIT_PHOTO_DIR, old_name)
+            if src is None or not src.is_file():
+                self.send_json({"error": "photo not found"}, 404)
+                return
+            new_name = stem + src.suffix
+            if new_name == old_name:
+                self.send_json({"ok": True, "path": rel, "filename": old_name})
+                return
+            dst = safe_join(common.EDIT_PHOTO_DIR, new_name)
+            if dst is None or "/" in new_name:
+                self.send_json({"error": "bad name"}, 400)
+                return
+            if dst.exists():
+                self.send_json({"error": "already exists"}, 409)
+                return
+            try:
+                os.replace(src, dst)
+                cache_old = common.THUMB_DIR / "edit" / (Path(old_name).stem + "_thumb.webp")
+                cache_new = common.THUMB_DIR / "edit" / (Path(new_name).stem + "_thumb.webp")
+                if cache_old.is_file() and not cache_new.exists():
+                    os.replace(cache_old, cache_new)
+            except OSError as e:
+                self.send_json({"error": str(e)}, 500)
+                return
+            self.send_json({"ok": True, "path": f"edit/{new_name}", "filename": new_name})
+            return
+        src = safe_join(common.PHOTO_DIR, rel)
+        if src is None or not src.is_file():
+            self.send_json({"error": "photo not found"}, 404)
+            return
+        new_name = stem + src.suffix
+        if new_name == src.name:
+            self.send_json({"ok": True, "path": rel, "filename": src.name})
+            return
+        if "/" in new_name:
+            self.send_json({"error": "bad name"}, 400)
+            return
+        dst = src.parent / new_name
+        if dst.exists():
+            self.send_json({"error": "already exists"}, 409)
+            return
+        conn = common.get_db()
+        row = conn.execute("SELECT * FROM photos WHERE path=?", (rel,)).fetchone()
+        if row is None:
+            self.send_json({"error": "photo not found"}, 404)
+            return
+        new_rel = (Path(rel).parent / new_name).as_posix()
+        new_thumb_rel = Path(new_rel).with_suffix("").as_posix() + "_thumb.webp"
+        try:
+            os.replace(src, dst)
+            # サムネイルも追従（無ければ生成時に作り直される）
+            if row["thumb_path"]:
+                old_thumb = safe_join(common.THUMB_DIR, row["thumb_path"])
+                new_thumb = safe_join(common.THUMB_DIR, new_thumb_rel)
+                if (old_thumb is not None and new_thumb is not None
+                        and old_thumb.is_file() and not new_thumb.exists()):
+                    new_thumb.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(old_thumb, new_thumb)
+            conn.execute("UPDATE photos SET path=?, filename=?, thumb_path=? WHERE path=?",
+                         (new_rel, new_name, new_thumb_rel, rel))
+            conn.commit()
+        except OSError as e:
+            self.send_json({"error": str(e)}, 500)
+            return
+        try:
+            from . import backup
+            backup.mark_dirty()
+        except Exception:
+            pass
+        self.send_json({"ok": True, "path": new_rel, "filename": new_name})
+
     def _read_json_body(self, max_len: int = 1024 * 1024):
         """JSON ボディを読む。失敗時は None。"""
         try:
@@ -1620,6 +1722,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <button data-tool="mosaic">モザイク</button>
       <button data-tool="blur">ぼかし</button>
       <button data-tool="resize">リサイズ</button>
+      <button id="ed-rename">リネーム</button>
       <div class="ed-panel" id="ed-panel-rect">
         <div class="ed-hint">ドラッグした範囲に角丸の赤枠</div>
         <label>太さ <input type="range" id="ed-rect-width" min="1" max="5" step="1" value="3"><span id="ed-rect-width-v">3</span></label>
@@ -2676,6 +2779,49 @@ document.getElementById('ed-undo').onclick = () => {
   };
   img.onerror = () => alert('1つ戻せませんでした');
   img.src = url;
+};
+// ---------------- rename（拡張子より前を変更） ----------------
+document.getElementById('ed-rename').onclick = async () => {
+  const cur = ed.filename || '';
+  const dot = cur.lastIndexOf('.');
+  const stem = dot > 0 ? cur.slice(0, dot) : cur;
+  const ext = dot > 0 ? cur.slice(dot) : '';
+  const next = prompt(`新しいファイル名（拡張子 ${ext} はそのまま）`, stem);
+  if (next === null) return;
+  if (!next.trim() || next.trim() === stem) return;
+  let j = null;
+  try {
+    const r = await fetch('/api/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: ed.path, name: next.trim() }),
+    });
+    j = await r.json();
+  } catch (err) {
+    alert('変更に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('変更に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  ed.path = j.path; ed.filename = j.filename;
+  document.getElementById('ed-title').textContent = '編集中: ' + j.filename;
+  // 背後の一覧・ビューア表示も追従させる
+  const p = state.photos[lbIndex];
+  if (p && p.path !== j.path) {
+    const q = s => (s.includes('?') ? s.slice(s.indexOf('?')) : '');
+    if (j.path.startsWith('edit/')) {
+      const nm = j.path.slice(5);
+      p.original = '/editphoto/' + nm + q(p.original);
+      if (p.thumb) p.thumb = '/editthumb/' + nm + q(p.thumb);
+    } else {
+      p.original = '/photo/' + j.path + q(p.original);
+      if (p.thumb) {
+        p.thumb = '/thumb/' + j.path.replace(/\.[^.]*$/, '') + '_thumb.webp' + q(p.thumb);
+      }
+    }
+    p.path = j.path; p.filename = j.filename;
+  }
 };
 
 document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
