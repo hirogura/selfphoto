@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.1"
+    server_version = "selfphoto/0.9.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1872,6 +1872,8 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 </div>
 <script>
 const state = { view: 'photos', month: null, term: '', offset: 0, limit: 500, done: false, photos: [], selecting: false, selected: new Set(),
+  // loadPhotos の多重起動防止フラグと、view 切替時の旧 fetch 破棄用世代番号
+  loading: false, gen: 0,
   // 明示的にチェックされた見出し（フォルダ・月）。ファイル個別チェックでは付けない。
   // フォルダ見出しキー = 日付フォルダ（年/年月/年月日_）、月見出しキー = prefix（年/年月/）。
   folderSel: new Set(), monthSel: new Set() };
@@ -1934,6 +1936,8 @@ async function loadMonths() {
 // ---------------- backup settings ----------------
 const WATCH_LABELS = { 60: '1分ごと', 300: '5分ごと', 900: '15分ごと', 1800: '30分ごと', 3600: '1時間ごと' };
 function reloadBackup() {
+  state.gen++; // 旧 fetch の結果は破棄される
+  state.loading = false;
   state.photos = []; state.offset = 0; state.done = true;
   state.selected.clear(); state.folderSel.clear(); state.monthSel.clear();
   renderBackup();
@@ -2247,30 +2251,41 @@ async function refreshSidebarBackup() {
 }
 
 async function loadPhotos() {
-  if (state.view === 'backup' || state.done) return;
+  if (state.view === 'backup' || state.done || state.loading) return;
+  const gen = state.gen;
+  state.loading = true;
   document.getElementById('loading').textContent = '読み込み中…';
-  if (state.view === 'edits') {
-    // 編集画像フォルダは全件一括（件数は少ない想定）
-    const r = await fetch('/api/edits');
+  try {
+    if (state.view === 'edits') {
+      // 編集画像フォルダは全件一括（件数は少ない想定）
+      const r = await fetch('/api/edits');
+      if (gen !== state.gen) return; // view 切替後の旧 fetch は破棄
+      const j = await r.json();
+      if (gen !== state.gen) return;
+      state.photos.push(...(j.photos || []));
+      state.done = true;
+      render();
+      document.getElementById('loading').textContent = '';
+      return;
+    }
+    const q = new URLSearchParams({ limit: state.limit, offset: state.offset });
+    if (state.view === 'search') {
+      q.set('q', state.term);
+    }
+    const url = state.view === 'search' ? '/api/search' : '/api/photos';
+    const r = await fetch(url + '?' + q);
+    if (gen !== state.gen) return; // view 切替後の旧 fetch は破棄
     const j = await r.json();
-    state.photos.push(...(j.photos || []));
-    state.done = true;
+    if (gen !== state.gen) return;
+    if (j.photos.length < state.limit) state.done = true;
+    state.offset += j.photos.length;
+    state.photos.push(...j.photos);
     render();
-    document.getElementById('loading').textContent = '';
-    return;
+    document.getElementById('loading').textContent = state.done ? '' : 'もっと読み込む…';
+  } finally {
+    // 新しい世代の読み込み中はフラグを落とさない
+    if (gen === state.gen) state.loading = false;
   }
-  const q = new URLSearchParams({ limit: state.limit, offset: state.offset });
-  if (state.view === 'search') {
-    q.set('q', state.term);
-  }
-  const url = state.view === 'search' ? '/api/search' : '/api/photos';
-  const r = await fetch(url + '?' + q);
-  const j = await r.json();
-  if (j.photos.length < state.limit) state.done = true;
-  state.offset += j.photos.length;
-  state.photos.push(...j.photos);
-  render();
-  document.getElementById('loading').textContent = state.done ? '' : 'もっと読み込む…';
 }
 
 function render() {
@@ -2679,6 +2694,8 @@ const lazyObserver = new IntersectionObserver((entries, obs) => {
 }, { rootMargin: '600px' });
 
 function reload() {
+  state.gen++; // 旧 fetch の結果は破棄される
+  state.loading = false;
   state.photos = []; state.offset = 0; state.done = false;
   render(); loadPhotos();
 }
