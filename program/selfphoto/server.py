@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.5.0"
+    server_version = "selfphoto/0.5.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2672,14 +2672,40 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
     document.querySelectorAll('#editor .ed-panel')
       .forEach(x => x.classList.toggle('on', x.id === 'ed-panel-' + ed.tool));
     edCropBox.style.display = 'none'; ed.cropRect = null;
+    updateBrushCursor();
   };
 });
 [['ed-mosaic-strength', 'ed-mosaic-strength-v'], ['ed-mosaic-size', 'ed-mosaic-size-v'],
  ['ed-blur-strength', 'ed-blur-strength-v'], ['ed-blur-size', 'ed-blur-size-v']].forEach(([a, b]) => {
   document.getElementById(a).addEventListener('input', e => {
     document.getElementById(b).textContent = e.target.value;
+    updateBrushCursor();
   });
 });
+window.addEventListener('resize', updateBrushCursor);
+
+// ---------------- brush cursor ----------------
+// モザイク・ぼかし選択中は、写真上のカーソルを「太さ」と同じ直径の円にする
+// （表示倍率で換算。回転・リサイズ等で表示サイズが変わっても追従する）。
+function brushDiameter() {
+  const el = document.getElementById(ed.tool === 'mosaic' ? 'ed-mosaic-size' : 'ed-blur-size');
+  const idx = Math.max(0, Math.min(4, (parseInt(el && el.value, 10) || 3) - 1));
+  return ed.brushSizes[idx];
+}
+function updateBrushCursor() {
+  if ((ed.tool !== 'mosaic' && ed.tool !== 'blur') || !edCanvas.width) {
+    edCanvas.style.cursor = '';
+    return;
+  }
+  const r = edCanvas.getBoundingClientRect();
+  const d = Math.max(4, Math.round(brushDiameter() * r.width / edCanvas.width));
+  const c = Math.min(d, 128); // ブラウザのカーソル画像の上限
+  const h = Math.floor(c / 2);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${c}' height='${c}'>`
+    + `<circle cx='${h}' cy='${h}' r='${h - 1.5}' fill='none' stroke='black' stroke-width='2.5'/>`
+    + `<circle cx='${h}' cy='${h}' r='${h - 1.5}' fill='none' stroke='white' stroke-width='1'/></svg>`;
+  edCanvas.style.cursor = `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${h} ${h}, crosshair`;
+}
 
 // canvas 上の座標を画像ピクセル座標に変換する
 function edPos(e) {
@@ -2851,6 +2877,7 @@ edCanvas.addEventListener('pointercancel', () => { ed.cropDrag = null; ed.painti
 // ---------------- resize ----------------
 function updateResizeInfo() {
   document.getElementById('ed-rs-cur').textContent = `現在: ${edCanvas.width}×${edCanvas.height}`;
+  updateBrushCursor();
 }
 document.querySelectorAll('#ed-panel-resize [data-w]').forEach(b => {
   b.onclick = () => { document.getElementById('ed-rs-w').value = b.dataset.w; };
