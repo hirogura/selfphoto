@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.2"
+    server_version = "selfphoto/0.9.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2969,15 +2969,21 @@ document.getElementById('ed-rot-l').onclick = () => rotateEdCanvas(-1);
 document.getElementById('ed-rot-r').onclick = () => rotateEdCanvas(1);
 
 // ---------------- undo（1つ戻す） ----------------
-// 破壊的操作の直前にキャンバス全体を JPEG スナップショットとして保持する
-// （保存時と同じ 0.92 品質。モザイク等の筆操作は1ストローク=1履歴）。
+// 破壊的操作の直前にキャンバス全体をスナップショットとして保持する
+// （保存時と同じ形式・品質。JPEG/WebP は 0.92、PNG はロスレス。
+// モザイク等の筆操作は1ストローク=1履歴）。
 const ED_HISTORY_MAX = 20;
 function edPushHistory() {
   try {
-    ed.history.push(edCanvas.toDataURL('image/jpeg', 0.92));
+    ed.history.push(edHistoryURL());
     while (ed.history.length > ED_HISTORY_MAX) ed.history.shift();
   } catch (err) { /* 巨大画像等で取れなければ履歴なしで続行 */ }
   updateUndoButton();
+}
+function edHistoryURL() {
+  // PNG 保存時は透過情報を落とさないよう PNG で保持する
+  if (edSaveFormat().mime === 'image/png') return edCanvas.toDataURL('image/png');
+  return edCanvas.toDataURL('image/jpeg', 0.92);
 }
 function updateUndoButton() {
   const b = document.getElementById('ed-undo');
@@ -3381,9 +3387,32 @@ document.getElementById('ed-rs-apply').onclick = () => {
 };
 
 // ---------------- editor save ----------------
-function edBlob() {
-  return new Promise((res, rej) => edCanvas.toBlob(
-    b => b ? res(b) : rej(new Error('encode failed')), 'image/jpeg', 0.92));
+// 元画像の拡張子から保存形式を決める（canvas が書き出せるものだけ元形式を維持）。
+// png→PNG、webp→WebP、jpg/jpeg→JPEG、それ以外（gif/bmp/tiff/heic等）はJPEG。
+function edSaveFormat() {
+  const n = String(ed.filename || ed.path || '').toLowerCase();
+  if (n.endsWith('.png')) return { mime: 'image/png', ext: '.png' };
+  if (n.endsWith('.webp')) return { mime: 'image/webp', ext: '.webp' };
+  return { mime: 'image/jpeg', ext: '.jpg' };
+}
+function edEncode() {
+  // 希望形式→PNG→JPEG の順に試す（ブラウザが WebP 書き出し不可の場合等に備える）。
+  // 実際に出力できた形式を { blob, mime, ext } で返す。
+  const want = edSaveFormat().mime;
+  const cands = [want, 'image/png', 'image/jpeg'].filter((v, i, a) => a.indexOf(v) === i);
+  const extOf = mime => mime === 'image/png' ? '.png' : (mime === 'image/webp' ? '.webp' : '.jpg');
+  return new Promise((res, rej) => {
+    const tryNext = k => {
+      if (k >= cands.length) { rej(new Error('encode failed')); return; }
+      const mime = cands[k];
+      try {
+        edCanvas.toBlob(
+          b => { if (b) res({ blob: b, mime, ext: extOf(mime) }); else tryNext(k + 1); },
+          mime, mime === 'image/png' ? undefined : 0.92);
+      } catch (err) { tryNext(k + 1); }
+    };
+    tryNext(0);
+  });
 }
 function edStem() {
   const n = ed.filename || 'edit';
@@ -3392,11 +3421,11 @@ function edStem() {
 }
 document.getElementById('ed-overwrite').onclick = async () => {
   if (!confirm(`「${ed.filename}」に上書き保存しますか？（元に戻せません）`)) return;
-  const blob = await edBlob().catch(() => null);
-  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
+  const out = await edEncode().catch(() => null);
+  if (!out) { alert('画像の書き出しに失敗しました'); return; }
   const fd = new FormData();
   fd.append('path', ed.path);
-  fd.append('file', blob, 'edit.jpg');
+  fd.append('file', out.blob, 'edit' + out.ext);
   let j = null;
   try {
     const r = await fetch('/api/edit-overwrite', { method: 'POST', body: fd });
@@ -3414,20 +3443,20 @@ document.getElementById('ed-overwrite').onclick = async () => {
   reload();
 };
 document.getElementById('ed-saveas').onclick = async () => {
-  const blob = await edBlob().catch(() => null);
-  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
-  const name = edStem() + '_edit.jpg';
+  const out = await edEncode().catch(() => null);
+  if (!out) { alert('画像の書き出しに失敗しました'); return; }
+  const name = edStem() + '_edit' + out.ext;
   closeEditor(true);
   document.getElementById('lb-close').click();
-  uploadFiles([new File([blob], name, { type: 'image/jpeg' })]);
+  uploadFiles([new File([out.blob], name, { type: out.mime })]);
 };
 document.getElementById('ed-tolibrary').onclick = async () => {
-  const blob = await edBlob().catch(() => null);
-  if (!blob) { alert('画像の書き出しに失敗しました'); return; }
-  const name = edStem() + '_edit.jpg';
+  const out = await edEncode().catch(() => null);
+  if (!out) { alert('画像の書き出しに失敗しました'); return; }
+  const name = edStem() + '_edit' + out.ext;
   const fd = new FormData();
   fd.append('name', name);
-  fd.append('file', blob, name);
+  fd.append('file', out.blob, name);
   let j = null;
   try {
     const r = await fetch('/api/edit-save', { method: 'POST', body: fd });
