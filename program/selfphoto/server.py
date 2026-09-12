@@ -184,7 +184,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.5"
+    server_version = "selfphoto/0.0.6"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -976,7 +976,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div id="lb-content"></div>
 </div>
 <script>
-const state = { view: 'photos', month: null, term: '', offset: 0, limit: 500, done: false, photos: [], selecting: false, selected: new Set() };
+const state = { view: 'photos', month: null, term: '', offset: 0, limit: 500, done: false, photos: [], selecting: false, selected: new Set(),
+  // 明示的にチェックされた見出し（フォルダ・月）。ファイル個別チェックでは付けない。
+  // フォルダ見出しキー = 日付フォルダ（年/年月/年月日_）、月見出しキー = prefix（年/年月/）。
+  folderSel: new Set(), monthSel: new Set() };
 const fmt = d => {
   const t = new Date(d);
   return `${t.getFullYear()}年${t.getMonth()+1}月`;
@@ -1109,15 +1112,35 @@ function makeHeadBox(kind, key, paths) {
     box.addEventListener('click', e => {
       e.stopPropagation();
       const inMonth = state.photos.filter(p => p.path.startsWith(prefix));
-      const all = inMonth.every(p => state.selected.has(p.path));
-      inMonth.forEach(p => all ? state.selected.delete(p.path) : state.selected.add(p.path));
+      if (state.monthSel.has(prefix)) {
+        // 明示チェック解除：月・配下フォルダの明示を外し、ファイル選択も外す
+        state.monthSel.delete(prefix);
+        inMonth.forEach(p => {
+          state.selected.delete(p.path);
+          state.folderSel.delete(p.path.split('/').slice(0, 3).join('/'));
+        });
+      } else {
+        // 明示チェック：月・配下フォルダを明示扱いにし、ファイルを全選択
+        state.monthSel.add(prefix);
+        inMonth.forEach(p => {
+          state.selected.add(p.path);
+          state.folderSel.add(p.path.split('/').slice(0, 3).join('/'));
+        });
+      }
       refreshSelectionUi();
     });
   } else {
     box.addEventListener('click', e => {
       e.stopPropagation();
-      const all = paths.every(p => state.selected.has(p));
-      paths.forEach(p => all ? state.selected.delete(p) : state.selected.add(p));
+      if (state.folderSel.has(key)) {
+        // 明示チェック解除：フォルダの明示を外し、ファイル選択も外す
+        state.folderSel.delete(key);
+        paths.forEach(p => state.selected.delete(p));
+      } else {
+        // 明示チェック：フォルダを明示扱いにし、ファイルを全選択
+        state.folderSel.add(key);
+        paths.forEach(p => state.selected.add(p));
+      }
       refreshSelectionUi();
     });
   }
@@ -1134,6 +1157,8 @@ function refreshSelectionUi() {
     c.classList.toggle('selected', state.selected.has(c.dataset.path));
   });
   // 見出しのチェック表示更新
+  // ✓ は見出しを明示チェックした場合のみ。ファイル個別チェックだけでは付けない
+  // （フォルダ丸ごとの zip ダウンロードと区別するため）。件数表示は従来通り。
   document.querySelectorAll('.day-head').forEach(dh => {
     const folder = dh.dataset.folder;
     if (!folder) return;
@@ -1141,7 +1166,7 @@ function refreshSelectionUi() {
     const n = inFolder.filter(p => state.selected.has(p)).length;
     const box = dh.querySelector('.sel-box');
     if (box) {
-      box.textContent = n === 0 ? '' : (n === inFolder.length && inFolder.length > 0 ? '✓' : String(n));
+      box.textContent = state.folderSel.has(folder) ? '✓' : (n === 0 ? '' : String(n));
       dh.classList.toggle('on', n > 0);
     }
   });
@@ -1152,7 +1177,7 @@ function refreshSelectionUi() {
     const n = inMonth.filter(p => state.selected.has(p)).length;
     const box = mh.querySelector('.sel-box');
     if (box) {
-      box.textContent = n === 0 ? '' : (n === inMonth.length && inMonth.length > 0 ? '✓' : String(n));
+      box.textContent = state.monthSel.has(folderPrefix) ? '✓' : (n === 0 ? '' : String(n));
       mh.classList.toggle('on', n > 0);
     }
   });
@@ -1188,13 +1213,18 @@ function makeCell(p) {
 function toggleSel(p) {
   if (state.selected.has(p.path)) state.selected.delete(p.path);
   else state.selected.add(p.path);
+  // ファイル個別操作では見出しの明示チェックを付けない。逆に外れた場合は
+  // 所属フォルダ・月の明示を解除する（全選択状態が崩れるため）。
+  const seg = p.path.split('/');
+  if (seg.length >= 3) state.folderSel.delete(seg.slice(0, 3).join('/'));
+  if (seg.length >= 2) state.monthSel.delete(seg.slice(0, 2).join('/') + '/');
   refreshSelectionUi();
 }
 
 // ---------------- header actions ----------------
 document.getElementById('select-btn').addEventListener('click', () => {
   state.selecting = !state.selecting;
-  if (!state.selecting) state.selected.clear();
+  if (!state.selecting) { state.selected.clear(); state.folderSel.clear(); state.monthSel.clear(); }
   refreshSelectionUi();
 });
 
@@ -1268,7 +1298,8 @@ document.getElementById('update-btn').addEventListener('click', async () => {
 document.getElementById('download-btn').addEventListener('click', async () => {
   const sel = state.photos.filter(p => state.selected.has(p.path));
   if (!sel.length) { alert('ダウンロードする写真を選択してください'); return; }
-  // 日付フォルダごとにグループ化（フォルダ丸ごと選択されていたら zip、それ以外は 1 枚ずつ）
+  // 日付フォルダごとにグループ化（フォルダ見出しを明示チェックした場合のみ zip、
+  // ファイル個別チェックだけの場合は全ファイルでも 1 枚ずつ）
   const byFolder = new Map();
   for (const p of sel) {
     const seg = p.path.split('/');
@@ -1277,10 +1308,11 @@ document.getElementById('download-btn').addEventListener('click', async () => {
     byFolder.get(folder).push(p);
   }
   for (const [folder, items] of byFolder) {
-    // フォルダ内の全ファイルが選択されている場合は zip 1 つで
-    const allInFolder = state.photos.filter(p => p.path.startsWith(folder + '/'));
-    const fullFolder = allInFolder.length > 0 && items.length === allInFolder.length;
-    if (fullFolder && folder) {
+    // フォルダ見出し・月見出しの明示チェックがある場合のみ zip 1 つで
+    const fseg = folder ? folder.split('/') : [];
+    const monthPrefix = fseg.length >= 2 ? fseg.slice(0, 2).join('/') + '/' : '';
+    const folderChecked = folder && (state.folderSel.has(folder) || (monthPrefix && state.monthSel.has(monthPrefix)));
+    if (folderChecked) {
       const fname = folder.split('/').pop() || 'photos';
       await downloadUrl(`/api/zip?prefix=${encodeURIComponent(folder)}&name=${encodeURIComponent(fname)}`);
     } else {
