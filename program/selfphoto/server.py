@@ -184,7 +184,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.7"
+    server_version = "selfphoto/0.0.8"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -932,6 +932,9 @@ main { padding: 0 8px 80px 228px; }
   background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
   padding: 8px 12px; font-size: 14px; cursor: pointer;
 }
+#lightbox .lb-actions { display: flex; gap: 6px; }
+#lb-del { background: #5a2326; }
+#lb-del:hover { background: #752e33; }
 #lightbox .nav {
   position: fixed; top: 50%; transform: translateY(-50%);
   font-size: 26px; padding: 14px 16px; opacity: .75;
@@ -1040,7 +1043,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><button id="lb-close">閉じる ✕</button></div>
+  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
@@ -1553,6 +1556,47 @@ function moveLb(delta) {
   showLb();
 }
 document.getElementById('lb-close').onclick = () => { lb.classList.remove('open'); lbContent.innerHTML = ''; };
+document.getElementById('lb-dl').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  await downloadUrl(p.original, p.filename);
+};
+document.getElementById('lb-del').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  if (!confirm(`「${p.filename}」を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
+  let j = null;
+  try {
+    const r = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [p.path] }),
+    });
+    j = await r.json();
+  } catch (err) {
+    alert('削除に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok || !(j.deleted || []).includes(p.path)) {
+    alert('削除に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  state.photos.splice(lbIndex, 1);
+  state.selected.delete(p.path);
+  // 写真が残っていないフォルダ・月の明示チェックは外す
+  const seg = p.path.split('/');
+  const folder = seg.length >= 3 ? seg.slice(0, 3).join('/') : '';
+  const monthPrefix = seg.length >= 2 ? seg.slice(0, 2).join('/') + '/' : '';
+  if (folder && !state.photos.some(x => x.path.startsWith(folder + '/'))) state.folderSel.delete(folder);
+  if (monthPrefix && !state.photos.some(x => x.path.startsWith(monthPrefix))) state.monthSel.delete(monthPrefix);
+  if (!state.photos.length) {
+    document.getElementById('lb-close').click();
+  } else {
+    if (lbIndex >= state.photos.length) lbIndex = state.photos.length - 1;
+    showLb();
+  }
+  render();
+};
 document.getElementById('prev').onclick = () => moveLb(-1);
 document.getElementById('next').onclick = () => moveLb(1);
 document.addEventListener('keydown', e => {
