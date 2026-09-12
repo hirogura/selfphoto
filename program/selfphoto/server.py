@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.1.2"
+    server_version = "selfphoto/0.1.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1055,23 +1055,18 @@ body {
   display: flex; flex-direction: column; padding: 14px 10px;
 }
 #sidebar .logo {
-  display: flex; align-items: flex-end; gap: 7px;
+  display: flex; align-items: center; gap: 7px;
   font-weight: 700; font-size: 17px; padding: 6px 10px 14px; letter-spacing: .3px;
 }
 #sidebar .logo .logo-icon {
   width: 20px; height: 20px; border-radius: 5px; object-fit: cover;
-  margin-bottom: 2px; flex: none;
+  flex: none;
 }
 #sidebar .logo .ver {
   color: var(--muted); font-weight: 400; font-size: 11px; letter-spacing: 0;
-  margin: 0 0 2px -1px;
-}
-#sidebar .logo .ver {
-  color: var(--muted); font-weight: 400; font-size: 11px; letter-spacing: 0;
-  margin-left: -2px; align-self: flex-start; margin-top: 1px;
 }
 #sidebar .foot #restart-btn, #sidebar .foot #update-btn {
-  width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 6px;
   background: none; border: 1px solid var(--line); color: var(--muted);
   border-radius: 8px; padding: 7px 10px; font-size: 12px; cursor: pointer;
 }
@@ -1107,7 +1102,7 @@ body {
 header {
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 12px;
-  padding: 10px 16px; background: rgba(14,15,17,.92); backdrop-filter: blur(6px);
+  padding: 10px 16px 10px 236px; background: rgba(14,15,17,.92); backdrop-filter: blur(6px);
   border-bottom: 1px solid #222;
 }
 header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .3px; }
@@ -1321,6 +1316,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar .foot { display: none; }
   #sidebar nav button { justify-content: center; padding: 12px 0; }
   main { padding-left: 66px; }
+  header { padding-left: 76px; }
   #up-bar { left: 60px; }
   #search-box { max-width: none; }
   #scrubber { display: none; }
