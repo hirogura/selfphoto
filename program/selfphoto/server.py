@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.9.7"
+    server_version = "selfphoto/0.9.8"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1360,6 +1360,9 @@ body {
   background: var(--bg); color: var(--fg);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
 }
+/* ビューア・編集画面は全画面オーバーレイのため、開いている間は背面の
+   スクロールを止める（右端のネイティブスクロールバーも消える）。 */
+body.modal-open { overflow: hidden; }
 /* ---------------- sidebar ---------------- */
 #sidebar {
   position: fixed; top: 0; bottom: 0; left: 0; width: 220px; z-index: 30;
@@ -1916,6 +1919,7 @@ document.getElementById('side-backup').onclick = () => setView('backup');
 
 function setView(v) {
   state.view = v;
+  window.scrollTo(0, 0); // 画面切替は先頭から表示する
   if (backupTimer) { clearInterval(backupTimer); backupTimer = null; }
   document.querySelectorAll('#sidebar nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('nav-' + v).classList.add('active');
@@ -1959,6 +1963,9 @@ function reloadBackup() {
   state.loading = false;
   state.photos = []; state.offset = 0; state.done = true;
   state.selected.clear(); state.folderSel.clear(); state.monthSel.clear();
+  // 写真一覧用の年月スクラバーはバックアップ画面では不要なので隠す
+  // （render→buildScrubber で他ビュー表示時に復帰する）
+  document.getElementById('scrubber').style.display = 'none';
   renderBackup();
   refreshBackupStatus();
   if (backupTimer) clearInterval(backupTimer);
@@ -2725,6 +2732,13 @@ function reload() {
 let lbIndex = -1;
 const lb = document.getElementById('lightbox');
 const lbContent = document.getElementById('lb-content');
+// ビューア・編集画面のどちらかが開いている間は背面スクロールを止める。
+// （編集画面はビューアの上に重ねて開くため、両方見て判定する）
+function syncBodyScroll() {
+  const modal = lb.classList.contains('open')
+    || document.getElementById('editor').classList.contains('open');
+  document.body.classList.toggle('modal-open', modal);
+}
 function openLb(p) {
   lbIndex = state.photos.findIndex(x => x.path === p.path);
   showLb();
@@ -2733,6 +2747,7 @@ function showLb() {
   const p = state.photos[lbIndex];
   if (!p) return;
   lb.classList.add('open');
+  syncBodyScroll();
   lbContent.innerHTML = '';
   lbZoomIdx = LB_ZOOM_FIT; lbBaseW = 0;
   applyLbZoomButtons();
@@ -2812,7 +2827,7 @@ function moveLb(delta) {
   lbIndex = (lbIndex + delta + state.photos.length) % state.photos.length;
   showLb();
 }
-document.getElementById('lb-close').onclick = () => { lb.classList.remove('open'); lbContent.innerHTML = ''; };
+document.getElementById('lb-close').onclick = () => { lb.classList.remove('open'); lbContent.innerHTML = ''; syncBodyScroll(); };
 document.getElementById('lb-dl').onclick = async () => {
   const p = state.photos[lbIndex];
   if (!p) return;
@@ -2899,6 +2914,7 @@ function openEditor() {
     edCtx.drawImage(img, 0, 0);
     updateResizeInfo();
     document.getElementById('editor').classList.add('open');
+    syncBodyScroll();
   };
   img.onerror = () => alert('画像を読み込めませんでした');
   img.src = p.original + (p.original.includes('?') ? '&' : '?') + 't=' + Date.now();
@@ -2906,6 +2922,7 @@ function openEditor() {
 function closeEditor(force) {
   if (!force && ed.dirty && !confirm('編集内容を破棄して閉じますか？')) return;
   document.getElementById('editor').classList.remove('open');
+  syncBodyScroll();
   ed.tool = null; ed.dirty = false; ed.cropRect = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
