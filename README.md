@@ -46,10 +46,23 @@ Web UI 左上に表示）。
 
 ### 手順
 
+初回:
+
 ```bash
 cd /opt
 git clone https://github.com/hirogura/selfphoto.git
 cd selfphoto
+sudo ./install.sh
+```
+
+2 回目以降（更新・再インストール）は `/opt/selfphoto` が既にあるため
+`git clone` せずに `git pull` で更新してから実行する
+（`git clone` すると `fatal: destination path 'selfphoto' already exists`
+で失敗する）:
+
+```bash
+cd /opt/selfphoto
+git pull
 sudo ./install.sh
 ```
 
