@@ -75,6 +75,8 @@ sudo ./install.sh
 4. 旧レイアウト（データ直下の年フォルダ）があれば `photo/` 配下へ自動移行
 5. `/opt/lxd-data/selfphoto-data`（DB・写真・サムネイル）を作成（既存データは保持）
 6. systemd ユニット登録 + サーバ・タイマーを有効化して起動
+7. tailscale 接続済みなら `tailscale serve --bg --https=443` で自動公開
+   （`SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1` で無効化可）
 
 配置先を変えたい場合:
 
@@ -92,8 +94,18 @@ systemd の無い環境では、ユニット登録をスキップして手動起
 
 ### tailscale serve で公開
 
+`install.sh` が tailscale 接続済みの環境では自動で公開する
+（`https://<tailnetアドレス>/` → `http://127.0.0.1:3360`）。
+手動でやり直す場合:
+
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:3360
+```
+
+公開せずにインストールする場合:
+
+```bash
+sudo SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1 -E ./install.sh
 ```
 
 Tailnet 内の `https://<tailnetアドレス>/` でアクセスできる。

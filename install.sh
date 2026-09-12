@@ -207,6 +207,26 @@ else
   echo "  cd ${SELFPHPHOTO_HOME}/program && python3 -m selfphoto.server"
 fi
 
+# ===== tailscale serve で公開 =====
+# tailscale 接続済みの環境では 443 で selfphoto を公開する。
+# 再実行しても同じ設定の上書きになる。失敗してもインストール自体は続行する。
+# 明示的に無効化したい場合は SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1 を付けて実行する。
+TAILSCALE_SERVED=0
+if [[ "${SELFPHPHOTO_SKIP_TAILSCALE_SERVE:-0}" == "1" ]]; then
+  echo "tailscale serve による公開をスキップします (SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1)"
+elif command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; then
+  echo "tailscale serve で公開します: https://<tailnet>:443 -> http://127.0.0.1:3360"
+  if tailscale serve --bg --https=443 http://127.0.0.1:3360; then
+    TAILSCALE_SERVED=1
+  else
+    echo "警告: tailscale serve の設定に失敗しました。手動で実行してください:" >&2
+    echo "  tailscale serve --bg --https=443 http://127.0.0.1:3360" >&2
+  fi
+else
+  echo "tailscale 未接続のため公開をスキップします（接続後に手動で公開できます）:"
+  echo "  tailscale serve --bg --https=443 http://127.0.0.1:3360"
+fi
+
 # ===== 完了 =====
 echo
 echo "=== インストール完了 ==="
@@ -233,7 +253,11 @@ if command -v tailscale >/dev/null 2>&1; then
   TAIL_DNS="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
 fi
 echo
-if [[ -n "${TAIL_DNS}" ]]; then
+if [[ "${TAILSCALE_SERVED}" == "1" && -n "${TAIL_DNS}" ]]; then
+  echo "アクセス先     : https://${TAIL_DNS}/ （tailscale serve で公開中）"
+elif [[ "${TAILSCALE_SERVED}" == "1" && -n "${TAIL_ADDR}" ]]; then
+  echo "アクセス先     : https://${TAIL_ADDR}/ （tailscale serve で公開中）"
+elif [[ -n "${TAIL_DNS}" ]]; then
   echo "アクセス先     : https://${TAIL_DNS}:3360"
 elif [[ -n "${TAIL_ADDR}" ]]; then
   echo "アクセス先     : https://${TAIL_ADDR}:3360"
@@ -242,7 +266,9 @@ else
   echo "  （tailscale に接続後に 'tailscale ip -4' で表示されるアドレスに置き換えてください）"
 fi
 echo
-echo "tailscale 経由で公開する場合:"
+echo "tailscale serve の公開をやり直す場合:"
 echo "  tailscale serve --bg --https=443 http://127.0.0.1:3360"
+echo "公開しない場合のインストール:"
+echo "  sudo SELFPHPHOTO_SKIP_TAILSCALE_SERVE=1 -E ./install.sh"
 echo
 echo "アンインストール: sudo ${SELFPHPHOTO_HOME}/uninstall.sh または リポジトリの uninstall.sh"
