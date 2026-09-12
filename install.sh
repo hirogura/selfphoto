@@ -107,6 +107,12 @@ if [[ -f "${SELFPHPHOTO_HOME}/uninstall.sh" ]]; then
   chmod 755 "${SELFPHPHOTO_HOME}/uninstall.sh"
 fi
 
+# ===== データ・写真・サムネイル用ディレクトリを事前に作成 =====
+# mkdir -p は既存フォルダがあっても削除・上書きしない（中身はそのまま保持される）。
+# server 起動時に DB・写真ディレクトリが無いと起動失敗するため、移行処理より先に作る。
+mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
+chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
+
 # ===== 旧配置のデータ移行（プログラム領域に置きっぱなしになっている場合） =====
 # 旧バージョンは写真・サムネイル・DB を /opt/selfphoto 配下に置いていたため、
 # あればデータ領域へ移動する（写真データがワークスペース配下に残らないようにする）。
@@ -117,6 +123,7 @@ NEW_DB="${SELFPHPHOTO_DATA_DIR}/selfphoto.db"
 if [[ -d "${OLD_DATA}" && ! -L "${OLD_DATA}" ]]; then
   if [[ -d "${OLD_DATA}/2026" || -n "$(ls -A "${OLD_DATA}" 2>/dev/null)" ]]; then
     echo "旧配置の写真データを移動: ${OLD_DATA} -> ${SELFPHPHOTO_DATA_DIR}"
+    mkdir -p "${SELFPHPHOTO_DATA_DIR}"
     cp -a "${OLD_DATA}/." "${SELFPHPHOTO_DATA_DIR}/"
     mv "${OLD_DATA}" "${OLD_DATA}.migrated"
   else
@@ -135,6 +142,7 @@ if [[ -d "${OLD_THUMB}" && ! -L "${OLD_THUMB}" ]]; then
 fi
 if [[ -f "${OLD_DB}" && ! -e "${NEW_DB}" ]]; then
   echo "旧配置の DB を移動: ${OLD_DB} -> ${NEW_DB}"
+  mkdir -p "$(dirname "${NEW_DB}")"
   for extra in "${OLD_DB}-wal" "${OLD_DB}-shm"; do
     if [[ -f "$extra" ]]; then
       cp -a "$extra" "${NEW_DB}${extra##${OLD_DB}}"
@@ -166,11 +174,10 @@ if ((${#year_dirs[@]})); then
 fi
 shopt -u nullglob
 
-# ===== データ・写真・サムネイル・DB ディレクトリ作成 =====
-# 既存データ・DB は触らない（更新インストールでも保持される）
-install -d -m 755 "${SELFPHPHOTO_DATA_DIR}"
-install -d -m 755 "${SELFPHPHOTO_PHOTO_DIR}"
-install -d -m 755 "${SELFPHPHOTO_THUMB_DIR}"
+# ===== データ・写真・サムネイル・DB ディレクトリ作成（念のため再確認） =====
+# mkdir -p は既存フォルダがあっても削除しない。既存データ・DB は触らない（更新インストールでも保持される）
+mkdir -p "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
+chmod 755 "${SELFPHPHOTO_DATA_DIR}" "${SELFPHPHOTO_PHOTO_DIR}" "${SELFPHPHOTO_THUMB_DIR}"
 
 # ===== systemd ユニット登録 =====
 if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
@@ -203,6 +210,22 @@ if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
   echo
 fi
 echo "Web UI        : http://127.0.0.1:3360"
+# Tailnet 経由のアクセス先 URL を表示する（実アドレスは実行時に動的取得し、埋め込まない）
+TAIL_ADDR=""
+TAIL_DNS=""
+if command -v tailscale >/dev/null 2>&1; then
+  TAIL_ADDR="$(tailscale ip -4 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+  TAIL_DNS="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
+fi
+echo
+if [[ -n "${TAIL_DNS}" ]]; then
+  echo "アクセス先     : https://${TAIL_DNS}:3360"
+elif [[ -n "${TAIL_ADDR}" ]]; then
+  echo "アクセス先     : https://${TAIL_ADDR}:3360"
+else
+  echo "アクセス先     : https://<tailnetアドレス>:3360"
+  echo "  （tailscale に接続後に 'tailscale ip -4' で表示されるアドレスに置き換えてください）"
+fi
 echo
 echo "tailscale 経由で公開する場合:"
 echo "  tailscale serve --bg --https=443 http://127.0.0.1:3360"

@@ -184,7 +184,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.3"
+    server_version = "selfphoto/0.0.4"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1518,6 +1518,8 @@ loadPhotos();
 
 
 def main() -> None:
+    common.PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    common.THUMB_DIR.mkdir(parents=True, exist_ok=True)
     common.init_db()
     server = ThreadingHTTPServer((common.HOST, common.PORT), Handler)
     server.daemon_threads = True

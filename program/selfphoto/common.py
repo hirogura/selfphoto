@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-VERSION = "0.0.3"
+VERSION = "0.0.4"
 
 # ディレクトリ設定
 # 写真・サムネイル・DB はプログラム領域 (/opt/selfphoto) と完全に分離し、
@@ -78,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_photos_thumb_done ON photos(thumb_done);
 
 
 def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = get_db()
     conn.executescript(SCHEMA)
     conn.commit()
