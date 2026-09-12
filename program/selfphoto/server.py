@@ -184,7 +184,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.2"
+    server_version = "selfphoto/0.0.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -283,6 +283,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_upload()
             elif path == "/api/restart":
                 self.api_restart()
+            elif path == "/api/update":
+                self.api_update()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -403,6 +405,69 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_json({"ok": True, "restarting": unit})
         # レスポンス送信を確実に完了させてから再起動する
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass
+        subprocess.Popen(
+            ["systemctl", "restart", unit],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def api_update(self) -> None:
+        """GitHub から最新版を取得して install.sh で更新する。
+
+        リポジトリを一時ディレクトリに clone し、install.sh を実行する
+        （プログラム一式の上書き・systemd ユニット再登録。写真・DB は保持）。
+        systemd 環境ではレスポンス後に selfphoto-server.service を再起動して
+        新しいコードを読み込ませる。
+        """
+        import tempfile
+
+        repo = os.environ.get(
+            "SELFPHPHOTO_UPDATE_REPO", "https://github.com/hirogura/selfphoto.git")
+        home = os.environ.get("SELFPHPHOTO_HOME", str(common.PROGRAM_DIR.parent))
+        if not shutil.which("git"):
+            self.send_json({"ok": False, "error": "git not found"}, 500)
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="selfphoto-update-") as tmp:
+                clone = subprocess.run(
+                    ["git", "clone", "--depth", "1", repo, "repo"],
+                    cwd=tmp, capture_output=True, text=True, timeout=300,
+                )
+                if clone.returncode != 0:
+                    self.send_json({"ok": False,
+                                    "error": f"git clone failed: {clone.stderr.strip()}"}, 500)
+                    return
+                repo_dir = Path(tmp) / "repo"
+                installer = repo_dir / "install.sh"
+                if not installer.is_file():
+                    self.send_json({"ok": False, "error": "install.sh not found in repo"}, 500)
+                    return
+                env = dict(os.environ, SELFPHPHOTO_HOME=home)
+                inst = subprocess.run(
+                    ["bash", "install.sh"], cwd=repo_dir,
+                    capture_output=True, text=True, timeout=600, env=env,
+                )
+                if inst.returncode != 0:
+                    tail = (inst.stderr.strip() or inst.stdout.strip())[-2000:]
+                    self.send_json({"ok": False,
+                                    "error": f"install.sh failed: {tail}"}, 500)
+                    return
+        except subprocess.TimeoutExpired:
+            self.send_json({"ok": False, "error": "update timed out"}, 504)
+            return
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(e)}, 500)
+            return
+        unit = os.environ.get("SELFPHPHOTO_RESTART_UNIT", "selfphoto-server.service")
+        if not (os.path.isdir("/run/systemd/system") and shutil.which("systemctl")):
+            self.send_json({"ok": True, "restarting": None,
+                            "note": "updated; restart manually (systemd not available)"})
+            return
+        self.send_json({"ok": True, "restarting": unit})
         try:
             self.wfile.flush()
         except OSError:
@@ -639,13 +704,13 @@ body {
   color: var(--muted); font-weight: 400; font-size: 11px; letter-spacing: 0;
   margin-left: -2px; align-self: flex-start; margin-top: 1px;
 }
-#sidebar .foot #restart-btn {
+#sidebar .foot #restart-btn, #sidebar .foot #update-btn {
   width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px;
   background: none; border: 1px solid var(--line); color: var(--muted);
   border-radius: 8px; padding: 7px 10px; font-size: 12px; cursor: pointer;
 }
-#sidebar .foot #restart-btn:hover { color: var(--fg); border-color: #3a3d44; background: #1d1f24; }
-#sidebar .foot .foot-note { margin-top: 8px; font-size: 11px; }
+#sidebar .foot #restart-btn:hover, #sidebar .foot #update-btn:hover { color: var(--fg); border-color: #3a3d44; background: #1d1f24; }
+#sidebar .foot #update-btn { margin-top: 6px; }
 #restart-ov {
   position: fixed; inset: 0; z-index: 200; display: none;
   background: rgba(0,0,0,.72); align-items: center; justify-content: center;
@@ -847,10 +912,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   </nav>
   <div class="foot">
     <button id="restart-btn"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3v4h-4"/></svg><span>再起動</span></button>
-    <div class="foot-note">dockerless · tailnet only</div>
+    <button id="update-btn"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg><span>アップデート</span></button>
   </div>
 </aside>
-<div id="restart-ov"><div class="ro-inner">再起動中…</div></div>
+<div id="restart-ov"><div class="ro-inner" id="ro-text">再起動中…</div></div>
 <header>
   <h1 id="view-title">写真</h1>
   <span class="count" id="count"></span>
@@ -1104,6 +1169,7 @@ document.getElementById('select-btn').addEventListener('click', () => {
 document.getElementById('restart-btn').addEventListener('click', async () => {
   if (!confirm('selfphoto サービスを再起動しますか？')) return;
   const ov = document.getElementById('restart-ov');
+  document.getElementById('ro-text').textContent = '再起動中…';
   ov.classList.add('on');
   try {
     const r = await fetch('/api/restart', { method: 'POST' });
@@ -1120,6 +1186,43 @@ document.getElementById('restart-btn').addEventListener('click', async () => {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     await new Promise(res => setTimeout(res, 1000));
+    try {
+      const r = await fetch('/healthz', { cache: 'no-store' });
+      if (r.ok) { location.reload(); return; }
+    } catch (err) { /* まだ上がっていない */ }
+  }
+  ov.classList.remove('on');
+  alert('サーバの復帰を確認できませんでした。時間をおいて再読み込みしてください。');
+});
+
+// ---------------- update (sidebar) ----------------
+document.getElementById('update-btn').addEventListener('click', async () => {
+  if (!confirm('GitHub から最新版を取得してアップデートしますか？')) return;
+  const ov = document.getElementById('restart-ov');
+  const roText = document.getElementById('ro-text');
+  roText.textContent = '更新中…';
+  ov.classList.add('on');
+  try {
+    const r = await fetch('/api/update', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert('アップデートに失敗しました: ' + (j.error || r.status));
+      ov.classList.remove('on');
+      return;
+    }
+    if (!j.restarting) {
+      alert('更新しました。サーバを手動で再起動してください。');
+      ov.classList.remove('on');
+      return;
+    }
+  } catch (err) {
+    // 再起動が先に走って接続が切れることはある。その場合は続行。
+  }
+  // サーバが上がってくるまでポーリング（更新は時間がかかるため最大 5 分）
+  roText.textContent = '再起動中…';
+  const deadline = Date.now() + 300000;
+  while (Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 2000));
     try {
       const r = await fetch('/healthz', { cache: 'no-store' });
       if (r.ok) { location.reload(); return; }

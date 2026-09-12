@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.0.2 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.0.3 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -109,7 +109,8 @@ python3 -m selfphoto.server
 ```
 
 Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／アップロード、
-左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動）、
+左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動、
+「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
 右端のスクロールインジケータ（年月バー・クリックでジャンプ、スクロール中は
 見ている年月フォルダを表示）、ドラッグ＆ドロップ／複数ファイル一括アップロード
@@ -145,6 +146,7 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／検索／�
 - `GET /api/months` — 月ごとの件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
+- `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
 - `GET /photo/<相対パス>` — オリジナル（Range 対応、動画シーク可）
 - `GET /healthz` — ヘルスチェック
