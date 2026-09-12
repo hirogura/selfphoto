@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.1.0"
+    server_version = "selfphoto/0.1.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1364,7 +1364,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
+  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
@@ -1927,6 +1927,7 @@ function showLb() {
   document.getElementById('lb-title').textContent =
     `${p.filename}　${p.camera || ''} ${p.width||''}×${p.height||''}`;
   document.getElementById('lb-edit').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-copy').style.display = p.isVideo ? 'none' : 'block';
   history.replaceState(null, '', '#p=' + encodeURIComponent(p.path));
 }
 function moveLb(delta) {
@@ -2025,6 +2026,45 @@ function closeEditor(force) {
   ed.tool = null; ed.dirty = false; ed.cropRect = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
+document.getElementById('lb-copy').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p || p.isVideo) return;
+  if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+    alert('このブラウザは画像のコピーに対応していません');
+    return;
+  }
+  const writeBlob = (blob) => navigator.clipboard.write(
+    [new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+  try {
+    const r = await fetch(p.original, { cache: 'force-cache' });
+    const blob = await r.blob();
+    try {
+      await writeBlob(blob);
+    } catch (err) {
+      // 元形式が非対応の場合は PNG に変換して再試行
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res; img.onerror = rej;
+        img.src = URL.createObjectURL(blob);
+      });
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      const png = await new Promise((res, rej) => c.toBlob(
+        b => b ? res(b) : rej(new Error('encode failed')), 'image/png'));
+      await writeBlob(png);
+    }
+    try { flashLbTitle('コピーしました'); } catch (err) { /* noop */ }
+  } catch (err) {
+    alert('コピーに失敗しました');
+  }
+};
+function flashLbTitle(msg) {
+  const t = document.getElementById('lb-title');
+  const orig = t.textContent;
+  t.textContent = msg;
+  setTimeout(() => { t.textContent = orig; }, 1500);
+}
 document.getElementById('ed-close').onclick = () => closeEditor(false);
 
 document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
