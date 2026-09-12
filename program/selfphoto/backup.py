@@ -166,6 +166,138 @@ def build_command(cfg: dict) -> tuple[list[str], dict[str, str], str]:
     return argv, env_add, " ".join(argv)
 
 
+SSH_TIMEOUT = 20
+
+
+def _ssh_dest(ssh: dict) -> str:
+    host = (ssh.get("host") or "").strip()
+    user = (ssh.get("user") or "").strip()
+    return f"{user}@{host}" if user else host
+
+
+def _ssh_base_args(ssh: dict) -> list[str]:
+    args = ["ssh", "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=10"]
+    port = (str(ssh.get("port") or "22")).strip() or "22"
+    if port != "22":
+        args += ["-p", port]
+    key = (ssh.get("key") or "").strip()
+    if key:
+        args += ["-i", key]
+    return args
+
+
+def _ssh_env_add(ssh: dict) -> dict[str, str]:
+    password = ssh.get("password") or ""
+    if password and shutil.which("sshpass"):
+        return {"SSHPASS": password}
+    return {}
+
+
+def _ssh_prefix(ssh: dict) -> list[str]:
+    if _ssh_env_add(ssh):
+        return ["sshpass", "-e"]
+    return []
+
+
+def parse_remote_path(tgt: str, ssh: dict) -> str:
+    """ターゲット文字列からリモート側パスだけ取り出す。
+    user@host:path 形式にも素の path にも対応する。"""
+    t = (tgt or "").strip()
+    if ":" in t:
+        _, _, rp = t.rpartition(":")
+        return rp.strip() or t
+    return t
+
+
+def test_ssh_connection(ssh: dict) -> dict:
+    """SSH 接続だけ確認する。成功なら {"ok": True}、失敗なら理由付きで返す。"""
+    host = ((ssh or {}).get("host") or "").strip()
+    if not host:
+        return {"ok": False, "error": "ssh host required"}
+    if shutil.which("ssh") is None:
+        return {"ok": False, "error": "ssh not found"}
+    dest = _ssh_dest(ssh)
+    argv = _ssh_prefix(ssh) + _ssh_base_args(ssh) + [dest, "echo", "ok"]
+    env = dict(os.environ)
+    env.update(_ssh_env_add(ssh))
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=SSH_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "ssh connection timed out"}
+    except FileNotFoundError:
+        return {"ok": False, "error": "ssh not found"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    if proc.returncode == 0 and proc.stdout.strip().endswith("ok"):
+        return {"ok": True, "message": "SSH接続OK"}
+    log = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return {"ok": False, "error": f"ssh connection failed (exit {proc.returncode}): {log[:2000]}"}
+
+
+def check_target(target: str, ssh: dict | None = None, create: bool = True) -> dict:
+    """ターゲットフォルダの存在確認。無い場合は作成する（mkdir -p）。
+    成功なら {"ok": True, "created": bool} を返す。"""
+    ssh = ssh or {}
+    tgt = (target or "").strip()
+    if not tgt:
+        return {"ok": False, "error": "target required"}
+    use_ssh = bool(ssh.get("enabled") and (ssh.get("host") or "").strip())
+    if use_ssh:
+        remote = parse_remote_path(tgt, ssh)
+        if not remote or not remote.startswith(("/", "~")):
+            return {"ok": False, "error": "remote target must be absolute path"}
+        if shutil.which("ssh") is None:
+            return {"ok": False, "error": "ssh not found"}
+        dest = _ssh_dest(ssh)
+        env = dict(os.environ)
+        env.update(_ssh_env_add(ssh))
+
+        def _run_remote(*remote_cmd: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                _ssh_prefix(ssh) + _ssh_base_args(ssh) + [dest, *remote_cmd],
+                capture_output=True, text=True, timeout=SSH_TIMEOUT, env=env)
+
+        try:
+            # 先に存在確認（作成したかどうかの表示用）
+            pre = _run_remote("test", "-d", remote)
+            existed = (pre.returncode == 0)
+            if not existed and create:
+                mk = _run_remote("mkdir", "-p", remote)
+                if mk.returncode != 0:
+                    log = ((mk.stdout or "") + (mk.stderr or "")).strip()
+                    return {"ok": False, "error": f"mkdir remote failed: {log[:2000]}"}
+            post = _run_remote("test", "-d", remote)
+            if post.returncode != 0:
+                log = ((post.stdout or "") + (post.stderr or "")).strip()
+                return {"ok": False, "error": f"remote target not found: {log[:2000]}"}
+            return {"ok": True, "created": (not existed),
+                    "message": "フォルダOK（既存）" if existed else "フォルダを作成しました"}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "ssh connection timed out"}
+        except FileNotFoundError:
+            return {"ok": False, "error": "ssh not found"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+    # ローカル
+    p = Path(tgt)
+    if not p.is_absolute():
+        return {"ok": False, "error": "target must be absolute"}
+    existed = p.is_dir()
+    if not existed and create:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"ok": False, "error": f"mkdir target failed: {e}"}
+    if not p.is_dir():
+        return {"ok": False, "error": "target not found"}
+    if not os.access(p, os.W_OK | os.X_OK):
+        return {"ok": False, "error": "target not writable"}
+    return {"ok": True, "created": (not existed),
+            "message": "フォルダOK（既存）" if existed else "フォルダを作成しました"}
+
+
 def rsync_available() -> bool:
     return shutil.which("rsync") is not None
 
@@ -203,13 +335,13 @@ def run_once(detail: str = "manual") -> dict:
         if err:
             return _finish_run(False, -1, f"invalid config: {err}", started, detail)
         argv, env_add, _display = build_command(cfg)
-        # ターゲットがローカルなら事前に作る（SSH 先は rsync に任せる）
+        # ターゲットが無い場合は作成する（ローカルは mkdir -p、
+        # SSH 先はリモートで mkdir -p）。ここで失敗したら接続エラーと
+        # 区別できるようメッセージを付ける。
         ssh = cfg.get("ssh") or {}
-        if not (ssh.get("enabled") and (ssh.get("host") or "").strip()):
-            try:
-                Path(cfg["target"]).mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                return _finish_run(False, -1, f"mkdir target failed: {e}", started, detail)
+        chk = check_target(cfg.get("target") or "", ssh, create=True)
+        if not chk.get("ok"):
+            return _finish_run(False, -1, f"target check failed: {chk.get('error')}", started, detail)
         env = dict(os.environ)
         env.update(env_add)
         try:

@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.2.0"
+    server_version = "selfphoto/0.2.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -298,6 +298,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_backup_watch()
             elif path == "/api/backup-config":
                 self.api_backup_save()
+            elif path == "/api/backup-ssh-test":
+                self.api_backup_ssh_test()
+            elif path == "/api/backup-target-check":
+                self.api_backup_target_check()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -1104,6 +1108,49 @@ class Handler(BaseHTTPRequestHandler):
         r = backup.set_watch(enabled)
         self.send_json({"ok": True, "watching": r.get("watching", False)})
 
+    def _backup_ssh_from_body(self, body: dict) -> dict:
+        """リクエストボディ→SSH設定dict。無ければ保存済み設定を使う。"""
+        from . import backup
+
+        if isinstance(body.get("ssh"), dict):
+            ssh = dict(backup.load_config().get("ssh") or {})
+            for k in ("enabled", "host", "user", "port", "key", "password"):
+                if k in body["ssh"]:
+                    v = body["ssh"][k]
+                    ssh[k] = bool(v) if k == "enabled" else (str(v) if v is not None else "")
+            if body["ssh"].get("password") in (None, "", "****"):
+                ssh["password"] = backup.load_config()["ssh"].get("password", "")
+            return ssh
+        return dict(backup.load_config().get("ssh") or {})
+
+    def api_backup_ssh_test(self) -> None:
+        """SSH接続だけ確認する（保存不要。接続エラー切り分け用）。"""
+        from . import backup
+
+        body = self._read_json_body() or {}
+        ssh = self._backup_ssh_from_body(body)
+        r = backup.test_ssh_connection(ssh)
+        if r.get("ok"):
+            self.send_json({"ok": True, "message": r.get("message", "SSH接続OK")})
+        else:
+            self.send_json({"ok": False, "error": r.get("error", "ssh failed")}, 400)
+
+    def api_backup_target_check(self) -> None:
+        """ターゲットフォルダの確認。無い場合は作成する（mkdir -p）。"""
+        from . import backup
+
+        body = self._read_json_body() or {}
+        target = body.get("target")
+        if not isinstance(target, str) or not target:
+            target = backup.load_config().get("target") or ""
+        ssh = self._backup_ssh_from_body(body)
+        r = backup.check_target(target, ssh, create=True)
+        if r.get("ok"):
+            self.send_json({"ok": True, "created": bool(r.get("created")),
+                            "message": r.get("message", "OK")})
+        else:
+            self.send_json({"ok": False, "error": r.get("error", "target check failed")}, 400)
+
     def _write_chunk(self, data: bytes) -> None:
         if data:
             self.wfile.write(f"{len(data):X}\r\n".encode() + data + b"\r\n")
@@ -1264,6 +1311,9 @@ main { padding: 0 8px 80px 228px; }
   padding: 8px 16px; font-size: 13px; cursor: pointer;
 }
 #backup-form .bk-row button:hover { background: #33363c; }
+#backup-form .bk-msg { font-size: 12px; }
+#backup-form .bk-msg.ok { color: #7ee2a8; }
+#backup-form .bk-msg.ng { color: #ff9a9a; }
 #bk-status { font-size: 13px; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
 #bk-log {
   background: #0a0b0d; border: 1px solid var(--line); border-radius: 8px;
@@ -1648,6 +1698,8 @@ function renderBackup() {
     <p class="bk-desc">rsync で写真フォルダをコピーします（オプション固定: <code>-r -t -u -v --progress</code>）。</p>
     <label>ソースフォルダ<input id="bk-source" type="text"></label>
     <label>ターゲットフォルダ<input id="bk-target" type="text" placeholder="/mnt/backup/selfphoto または SSH時はリモートパス"></label>
+    <div class="bk-row"><button id="bk-target-check" type="button">フォルダ確認</button><span id="bk-target-msg" class="bk-msg"></span></div>
+    <div class="bk-desc">無い場合は自動で作成します（ローカルは <code>mkdir -p</code>、SSH先はリモートで <code>mkdir -p</code>）。</div>
     <div class="bk-row">除外: <code>.upload-tmp/</code>（固定）</div>
     <fieldset><legend>SSHリモート接続</legend>
       <label class="bk-check"><input id="bk-ssh-on" type="checkbox"> SSH経由で転送する</label>
@@ -1658,6 +1710,8 @@ function renderBackup() {
         <label>鍵ファイル<input id="bk-ssh-key" type="text" placeholder="例: /root/.ssh/id_rsa（任意）"></label>
         <label>パスワード<input id="bk-ssh-pw" type="password" placeholder="変更しない場合は空欄"></label>
       </div>
+      <div class="bk-row"><button id="bk-ssh-test" type="button">接続確認</button><button id="bk-ssh-save" type="button">設定保存</button><span id="bk-ssh-msg" class="bk-msg"></span></div>
+      <div class="bk-desc">接続エラーとコピーエラーの切り分け用。先に「接続確認」でSSH疎通を確かめられます。</div>
     </fieldset>
     <fieldset><legend>監視（自動実行）</legend>
       <div class="bk-desc">保存・取込で写真が増えたら、選択した間隔で自動コピーします。</div>
@@ -1673,6 +1727,9 @@ function renderBackup() {
     <pre id="bk-log"></pre>`;
   tl.appendChild(wrap);
   document.getElementById('bk-save').onclick = saveBackupConfig;
+  document.getElementById('bk-ssh-save').onclick = saveBackupConfig;
+  document.getElementById('bk-ssh-test').onclick = testSshConnection;
+  document.getElementById('bk-target-check').onclick = checkTargetFolder;
   document.getElementById('bk-run').onclick = runBackupNow;
   document.getElementById('bk-watch').onclick = toggleBackupWatch;
   fetch('/api/backup-config').then(r => r.json()).then(j => {
@@ -1723,8 +1780,46 @@ async function saveBackupConfig() {
   const j = await r.json();
   if (!j.ok) { alert('保存に失敗しました: ' + (j.error || 'unknown')); return; }
   document.getElementById('bk-ssh-pw').value = '';
+  const sm = document.getElementById('bk-ssh-msg');
+  if (sm) { sm.textContent = '保存しました'; sm.className = 'bk-msg ok'; }
   alert('保存しました');
   refreshBackupStatus();
+}
+function setBkMsg(id, ok, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'bk-msg ' + (ok ? 'ok' : 'ng');
+}
+async function testSshConnection() {
+  const body = backupFormValues();
+  setBkMsg('bk-ssh-msg', true, '確認中…');
+  try {
+    const r = await fetch('/api/backup-ssh-test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssh: body.ssh }),
+    });
+    const j = await r.json();
+    if (j.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));
+    else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
+  } catch (err) {
+    setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
+  }
+}
+async function checkTargetFolder() {
+  const body = backupFormValues();
+  setBkMsg('bk-target-msg', true, '確認中…');
+  try {
+    const r = await fetch('/api/backup-target-check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: body.target, ssh: body.ssh }),
+    });
+    const j = await r.json();
+    if (j.ok) setBkMsg('bk-target-msg', true, 'OK: ' + (j.message || 'フォルダOK'));
+    else setBkMsg('bk-target-msg', false, 'NG: ' + (j.error || 'unknown'));
+  } catch (err) {
+    setBkMsg('bk-target-msg', false, 'NG: ' + err);
+  }
 }
 async function runBackupNow() {
   const r = await fetch('/api/backup-run', { method: 'POST' });

@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.0.2.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.0.2.1 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -186,9 +186,11 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 
 - **ソースフォルダ** : 既定は写真フォルダ全体。`photo/2026` のように絞っても可。
   `.upload-tmp/` は常に除外される
-- **ターゲットフォルダ** : ローカルパスまたは SSH 有効時はリモートパス
+- **ターゲットフォルダ** : ローカルパスまたは SSH 有効時はリモートパス。
+  「フォルダ確認」で存在確認。無い場合は自動作成（ローカル・リモートとも `mkdir -p`）
 - **SSHリモート接続** : ホスト・ユーザー・ポート・鍵ファイル・パスワードを指定
-  （パスワード認証には `sshpass` が必要。鍵認証を推奨）
+  （パスワード認証には `sshpass` が必要。鍵認証を推奨）。
+  「接続確認」で SSH 疎通だけをテスト（接続エラー切り分け用）、「設定保存」で保存
 - **オプション固定** : `-r`（再帰） `-t`（時刻維持） `-u`（新しいもののみ）
   `-v`（詳細） `--progress`（進捗）
 - **コピー実行** : 今すぐコピー（バックグラウンド実行、状態表示で進捗確認）
@@ -223,7 +225,9 @@ Web UI: Immich 風のレイアウト。左サイドバー（写真／編集写�
 - `POST /api/edit-overwrite` — 編集結果で上書き保存（multipart `path` + ファイル）
 - `GET /api/backup-config` — バックアップ設定を取得（パスワードはマスク）
 - `POST /api/backup-config` — バックアップ設定を保存
-- `POST /api/backup-run` — バックアップを今すぐ実行（バックグラウンド）
+- `POST /api/backup-run` — バックアップを今すぐ実行（バックグラウンド。ターゲットが無ければ自動作成）
+- `POST /api/backup-ssh-test` — SSH接続だけ確認（接続エラー切り分け用）
+- `POST /api/backup-target-check` — ターゲットフォルダ確認。無ければ作成（`mkdir -p`）
 - `GET /api/backup-status` — バックアップの状態・前回結果
 - `POST /api/backup-watch` — 監視の開始・停止（JSON `{"enabled": true}`）
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
