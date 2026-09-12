@@ -184,7 +184,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.0.6"
+    server_version = "selfphoto/0.0.7"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -285,6 +285,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_restart()
             elif path == "/api/update":
                 self.api_update()
+            elif path == "/api/delete":
+                self.api_delete()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -643,6 +645,71 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def api_delete(self) -> None:
+        """選択した写真を削除する（ファイル実体・サムネイル・DB 行）。
+
+        POST /api/delete {"paths": ["2026/202609/20260911_/IMG_0001.jpg", ...]}
+        paths は PHOTO_DIR からの相対パス。空になった日付フォルダは掃除する。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 1024 * 1024:
+            self.send_json({"error": "bad body"}, 400)
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            self.send_json({"error": "bad json"}, 400)
+            return
+        rels = body.get("paths") if isinstance(body, dict) else None
+        if not isinstance(rels, list) or not rels or len(rels) > 5000:
+            self.send_json({"error": "paths required (1-5000)"}, 400)
+            return
+        conn = common.get_db()
+        deleted, errors = [], []
+        touched_dirs = set()
+        for rel in rels:
+            if not isinstance(rel, str):
+                errors.append({"path": str(rel), "error": "bad path"})
+                continue
+            src = safe_join(common.PHOTO_DIR, rel)
+            if src is None:
+                errors.append({"path": rel, "error": "bad path"})
+                continue
+            # サムネイル（api_photos と同じ命名則: 元拡張子を除去 + _thumb.webp）
+            thumb_rel = Path(rel).with_suffix("").as_posix() + "_thumb.webp"
+            thumb = safe_join(common.THUMB_DIR, thumb_rel)
+            try:
+                if src.is_file():
+                    touched_dirs.add(src.parent)
+                    src.unlink()
+                if thumb is not None and thumb.is_file():
+                    touched_dirs.add(thumb.parent)
+                    thumb.unlink()
+                conn.execute("DELETE FROM photos WHERE path = ?", (rel,))
+                deleted.append(rel)
+            except Exception as e:  # noqa: BLE001
+                errors.append({"path": rel, "error": str(e)})
+        conn.commit()
+        # 空になったフォルダを親方向へ掃除する（写真・サムネイル両側、データルート直下まで）
+        for root in (common.PHOTO_DIR.resolve(), common.THUMB_DIR.resolve()):
+            for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    dp = d.resolve()
+                except OSError:
+                    continue
+                while dp != root and root in dp.parents and dp.is_dir():
+                    try:
+                        if any(dp.iterdir()):
+                            break
+                        dp.rmdir()
+                    except OSError:
+                        break
+                    dp = dp.parent
+        self.send_json({"ok": True, "deleted": deleted, "errors": errors})
+
     def _write_chunk(self, data: bytes) -> None:
         if data:
             self.wfile.write(f"{len(data):X}\r\n".encode() + data + b"\r\n")
@@ -879,7 +946,9 @@ main { padding: 0 8px 80px 228px; }
 }
 .header-actions button:hover { background: #33363c; }
 .header-actions button.on { background: var(--accent); color: #fff; }
-#download-btn { display: none; }
+#download-btn, #delete-btn { display: none; }
+#delete-btn { background: #5a2326; }
+#delete-btn:hover { background: #752e33; }
 /* ---------------- selection mode ---------------- */
 .cell { position: relative; }
 .cell .sel-box {
@@ -955,6 +1024,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <input id="search-box" type="search" placeholder="ファイル名・カメラで検索…" autocomplete="off">
   <div class="spacer"></div>
   <div class="header-actions">
+    <button id="delete-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg> 削除</button>
     <button id="download-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg> ダウンロード</button>
     <button id="select-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg> 選択</button>
     <button id="add-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg> アップロード</button>
@@ -1152,6 +1222,7 @@ function refreshSelectionUi() {
   document.getElementById('select-btn').textContent = state.selecting ? '解除' : '選択';
   document.getElementById('select-btn').classList.toggle('on', state.selecting);
   document.getElementById('download-btn').style.display = state.selecting ? 'block' : 'none';
+  document.getElementById('delete-btn').style.display = state.selecting ? 'block' : 'none';
   // セルの表示更新
   document.querySelectorAll('.cell').forEach(c => {
     c.classList.toggle('selected', state.selected.has(c.dataset.path));
@@ -1293,6 +1364,43 @@ document.getElementById('update-btn').addEventListener('click', async () => {
   }
   ov.classList.remove('on');
   alert('サーバの復帰を確認できませんでした。時間をおいて再読み込みしてください。');
+});
+
+document.getElementById('delete-btn').addEventListener('click', async () => {
+  const sel = state.photos.filter(p => state.selected.has(p.path));
+  if (!sel.length) { alert('削除する写真を選択してください'); return; }
+  if (!confirm(`${sel.length}件を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
+  const paths = sel.map(p => p.path);
+  let j = null;
+  try {
+    const r = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    });
+    j = await r.json();
+  } catch (err) {
+    alert('削除に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('削除に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  const gone = new Set(j.deleted || []);
+  if (gone.size) {
+    state.photos = state.photos.filter(p => !gone.has(p.path));
+    state.selected = new Set([...state.selected].filter(p => !gone.has(p)));
+    // 写真が残っていないフォルダ・月の明示チェックは外す
+    state.folderSel = new Set([...state.folderSel].filter(f =>
+      state.photos.some(p => p.path.startsWith(f + '/'))));
+    state.monthSel = new Set([...state.monthSel].filter(m =>
+      state.photos.some(p => p.path.startsWith(m))));
+    render();
+  }
+  if (j.errors && j.errors.length) {
+    alert(`${gone.size}件を削除しました。${j.errors.length}件は失敗しました`);
+  }
 });
 
 document.getElementById('download-btn').addEventListener('click', async () => {
