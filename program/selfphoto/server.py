@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.1.1"
+    server_version = "selfphoto/0.1.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2026,38 +2026,62 @@ function closeEditor(force) {
   ed.tool = null; ed.dirty = false; ed.cropRect = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
-document.getElementById('lb-copy').onclick = async () => {
+document.getElementById('lb-copy').onclick = () => {
   const p = state.photos[lbIndex];
   if (!p || p.isVideo) return;
   if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
     alert('このブラウザは画像のコピーに対応していません');
     return;
   }
+  // Blob → PNG 変換（maxSide > 0 で長辺を指定pxに縮小。iPhone の巨大画像対策）
+  const toPng = (blob, maxSide) => new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const m = Math.max(w, h);
+        if (maxSide > 0 && m > maxSide) {
+          const s = maxSide / m;
+          w = Math.round(w * s); h = Math.round(h * s);
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        c.toBlob(b => b ? res(b) : rej(new Error('encode failed')), 'image/png');
+      } catch (e) { rej(e); }
+    };
+    img.onerror = rej;
+    img.src = URL.createObjectURL(blob);
+  });
   const writeBlob = (blob) => navigator.clipboard.write(
     [new ClipboardItem({ [blob.type || 'image/png']: blob })]);
-  try {
-    const r = await fetch(p.original, { cache: 'force-cache' });
-    const blob = await r.blob();
-    try {
-      await writeBlob(blob);
-    } catch (err) {
-      // 元形式が非対応の場合は PNG に変換して再試行
-      const img = new Image();
-      await new Promise((res, rej) => {
-        img.onload = res; img.onerror = rej;
-        img.src = URL.createObjectURL(blob);
-      });
-      const c = document.createElement('canvas');
-      c.width = img.naturalWidth; c.height = img.naturalHeight;
-      c.getContext('2d').drawImage(img, 0, 0);
-      const png = await new Promise((res, rej) => c.toBlob(
-        b => b ? res(b) : rej(new Error('encode failed')), 'image/png'));
-      await writeBlob(png);
-    }
-    try { flashLbTitle('コピーしました'); } catch (err) { /* noop */ }
-  } catch (err) {
-    alert('コピーに失敗しました');
+  // iOS Safari は PNG のみ対応のため最初から PNG 化する（長辺2048に縮小）。
+  // gesture 内で write を呼ぶ Safari 対策として Promise を直接渡す。
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent || '')) {
+    const pngP = (async () => {
+      const r = await fetch(p.original, { cache: 'force-cache' });
+      return toPng(await r.blob(), 2048);
+    })();
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': pngP })]).then(
+      () => flashLbTitle('コピーしました'),
+      () => alert('コピーに失敗しました'));
+    return;
   }
+  (async () => {
+    try {
+      const r = await fetch(p.original, { cache: 'force-cache' });
+      const blob = await r.blob();
+      try {
+        await writeBlob(blob);
+      } catch (err) {
+        // 元形式が非対応の場合は PNG に変換して再試行
+        await writeBlob(await toPng(blob, 0));
+      }
+      flashLbTitle('コピーしました');
+    } catch (err) {
+      alert('コピーに失敗しました');
+    }
+  })();
 };
 function flashLbTitle(msg) {
   const t = document.getElementById('lb-title');
