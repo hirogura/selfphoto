@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.2.2"
+    server_version = "selfphoto/0.2.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1274,6 +1274,20 @@ body {
 #sidebar .foot {
   margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px;
 }
+#side-backup {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 0 2px 8px; font-size: 11px; color: var(--muted); line-height: 1.5;
+  cursor: pointer;
+}
+#side-backup .sb-row {
+  display: flex; align-items: center; gap: 5px;
+  white-space: nowrap; overflow: hidden;
+}
+#side-backup .dot { width: 7px; height: 7px; border-radius: 50%; background: #555; flex: none; }
+#side-backup .dot.on { background: #7ee2a8; }
+#side-backup .dot.run { background: var(--accent); }
+#side-backup .dot.ok { background: #7ee2a8; }
+#side-backup .dot.ng { background: #ff9a9a; }
 
 /* ---------------- top bar ---------------- */
 header {
@@ -1541,6 +1555,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
   </nav>
   <div class="foot">
+    <div id="side-backup" title="バックアップの状態（クリックでバックアップ画面へ）">
+      <div class="sb-row"><span class="dot" id="side-bk-dot"></span><span id="side-bk-watch">監視: -</span></div>
+      <div class="sb-row"><span id="side-bk-last">前回: -</span></div>
+    </div>
     <button id="restart-btn"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3v4h-4"/></svg><span>再起動</span></button>
     <button id="update-btn"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg><span>アップデート</span></button>
   </div>
@@ -1644,6 +1662,7 @@ document.getElementById('nav-edits').onclick = () => setView('edits');
 document.getElementById('nav-search').onclick = () => { setView('search'); searchBox.focus(); };
 document.getElementById('nav-backup').onclick = () => setView('backup');
 document.getElementById('nav-upload').onclick = () => fileInput.click();
+document.getElementById('side-backup').onclick = () => setView('backup');
 
 function setView(v) {
   state.view = v;
@@ -1874,6 +1893,30 @@ async function refreshBackupStatus() {
   }
   if (watchBtn) watchBtn.textContent = st.watching ? '監視停止' : '監視開始';
   if (logEl) logEl.textContent = (st.lastRun && st.lastRun.logTail) || '(ログなし)';
+  updateSidebarBackup(st);
+}
+
+// ---------------- sidebar backup status ----------------
+function updateSidebarBackup(st) {
+  const wEl = document.getElementById('side-bk-watch');
+  const lEl = document.getElementById('side-bk-last');
+  const dot = document.getElementById('side-bk-dot');
+  if (!wEl || !lEl || !st) return;
+  wEl.textContent = `監視: ${st.watching ? 'ON' : 'OFF'}`;
+  const last = st.lastRun;
+  lEl.textContent = last
+    ? `前回: ${last.ok ? '成功' : '失敗'} ${new Date(last.finishedAt * 1000).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+    : '前回: 未実行';
+  if (dot) dot.className = 'dot ' + (st.running ? 'run' : (last ? (last.ok ? 'ok' : 'ng') : (st.watching ? 'on' : '')));
+}
+async function refreshSidebarBackup() {
+  let st;
+  try {
+    st = await (await fetch('/api/backup-status')).json();
+  } catch (err) {
+    return;
+  }
+  updateSidebarBackup(st);
 }
 
 async function loadPhotos() {
@@ -2860,6 +2903,8 @@ async function uploadFiles(files) {
 
 loadMonths();
 loadPhotos();
+refreshSidebarBackup();
+setInterval(refreshSidebarBackup, 15000);
 </script>
 </body>
 </html>
