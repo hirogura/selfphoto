@@ -79,16 +79,16 @@ sudo systemctl enable --now selfphoto-scan.timer selfphoto-thumbs.timer
 ## tailscale serve で公開
 
 ```bash
-tailscale serve --bg --https=443 http://127.0.0.1:3360
+tailscale serve --bg --https=3360 http://127.0.0.1:3360
 ```
 
-Tailnet 内の `https://<tailnetアドレス>/` でアクセスできる。
+Tailnet 内の `https://<tailnetアドレス>:3360/` でアクセスできる。
 （旧バージョン構文: `tailscale serve https / http://127.0.0.1:3360`）
 
 特定マシンだけでなく tailnet 全体に公開する場合は:
 
 ```bash
-tailscale serve --bg --https=443,http://127.0.0.1:3360
+tailscale serve --bg --https=3360,http://127.0.0.1:3360
 ```
 
 ## 設定（環境変数）
