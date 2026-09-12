@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.0.1"
+    server_version = "selfphoto/1.1.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1695,8 +1695,12 @@ main { padding: 0 8px 80px 228px; }
 #editor .ed-main { flex: 1; display: flex; gap: 10px; padding: 0 14px; min-height: 0; }
 #editor .ed-canvas-wrap {
   flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
-  background: #000; overflow: hidden; min-width: 0;
+  background: #000; overflow: auto; min-width: 0;
 }
+/* 表示ズーム時（fit以外）はブロック配置に切り替える。
+   flex の中央寄せのままだとはみ出し分の上・左へスクロールできないため。 */
+#editor .ed-canvas-wrap.zoomed { display: block; }
+#editor .ed-canvas-wrap.zoomed #ed-canvas { display: block; margin: 0 auto; max-width: none; max-height: none; }
 #ed-canvas { max-width: 100%; max-height: 100%; touch-action: none; cursor: crosshair; }
 #ed-cropbox {
   position: absolute; display: none; z-index: 2; pointer-events: none;
@@ -1929,6 +1933,9 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="ed-main">
     <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><div id="ed-cropbox"></div></div>
     <div class="ed-side">
+      <button id="ed-zoom-in">拡大</button>
+      <button id="ed-zoom-label" title="クリックで画面に合わせる">100%</button>
+      <button id="ed-zoom-out">縮小</button>
       <button id="ed-rot-l">左回転</button>
       <button id="ed-rot-r">右回転</button>
       <button data-tool="rect">赤枠挿入</button>
@@ -3138,6 +3145,57 @@ function rotateEdCanvas(dir) {
 document.getElementById('ed-rot-l').onclick = () => rotateEdCanvas(-1);
 document.getElementById('ed-rot-r').onclick = () => rotateEdCanvas(1);
 
+// ---------------- editor zoom（表示のみ。画像データは変えない） ----------------
+// デフォルトは画面内に収まる縮小表示(fit)。拡大・縮小ボタンで段階ズームし、
+// はみ出した分はスクロールで見られる。回転・切抜き・リサイズ・1つ戻す・
+// 開き直しで fit に戻る。座標換算は表示倍率で行うため編集操作に影響しない。
+const ED_ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+const ED_ZOOM_FIT = 3;
+let edZoomIdx = ED_ZOOM_FIT, edBaseW = 0;
+function applyEdZoomButtons() {
+  const zin = document.getElementById('ed-zoom-in');
+  const zout = document.getElementById('ed-zoom-out');
+  const zlab = document.getElementById('ed-zoom-label');
+  if (zin) zin.disabled = edZoomIdx >= ED_ZOOM_STEPS.length - 1;
+  if (zout) zout.disabled = edZoomIdx <= 0;
+  if (zlab) zlab.textContent = Math.round(ED_ZOOM_STEPS[edZoomIdx] * 100) + '%';
+}
+function applyEdZoom() {
+  const f = ED_ZOOM_STEPS[edZoomIdx];
+  if (f === 1) {
+    edCanvas.style.width = ''; edCanvas.style.height = '';
+    edWrap.classList.remove('zoomed');
+  } else {
+    if (!edBaseW) edBaseW = edCanvas.clientWidth || edCanvas.width;
+    edCanvas.style.width = Math.max(1, Math.round(edBaseW * f)) + 'px';
+    edCanvas.style.height = 'auto';
+    edWrap.classList.add('zoomed');
+  }
+  // 選択中のトリミング枠があれば新しい表示倍率で置き直す
+  if (ed.cropRect && edCropBox.style.display === 'block') placeCropBox(ed.cropRect);
+  updateBrushCursor();
+  applyEdZoomButtons();
+}
+function stepEdZoom(dir) {
+  const next = Math.min(ED_ZOOM_STEPS.length - 1, Math.max(0, edZoomIdx + dir));
+  if (next === edZoomIdx) return;
+  edZoomIdx = next;
+  applyEdZoom();
+}
+function resetEdZoom() {
+  edZoomIdx = ED_ZOOM_FIT; edBaseW = 0;
+  edCanvas.style.width = ''; edCanvas.style.height = '';
+  edWrap.classList.remove('zoomed');
+  applyEdZoomButtons();
+}
+document.getElementById('ed-zoom-in').onclick = (e) => { e.stopPropagation(); stepEdZoom(1); };
+document.getElementById('ed-zoom-out').onclick = (e) => { e.stopPropagation(); stepEdZoom(-1); };
+document.getElementById('ed-zoom-label').onclick = (e) => {
+  e.stopPropagation();
+  edZoomIdx = ED_ZOOM_FIT; edBaseW = 0;
+  applyEdZoom();
+};
+
 // ---------------- undo（1つ戻す） ----------------
 // 破壊的操作の直前にキャンバス全体をスナップショットとして保持する
 // （保存時と同じ形式・品質。JPEG/WebP は 0.92、PNG はロスレス。
@@ -3291,10 +3349,7 @@ function cropRectOf() {
   h = Math.max(1, Math.min(h, edCanvas.height - y0));
   return { x: Math.round(x0), y: Math.round(y0), w: Math.round(w), h: Math.round(h) };
 }
-function drawCropBox() {
-  const r = cropRectOf();
-  if (!r) { edCropBox.style.display = 'none'; ed.cropRect = null; return; }
-  ed.cropRect = r;
+function placeCropBox(r) {
   const cr = edCanvas.getBoundingClientRect(), wr = edWrap.getBoundingClientRect();
   const sx = cr.width / edCanvas.width, sy = cr.height / edCanvas.height;
   edCropBox.style.display = 'block';
@@ -3302,6 +3357,12 @@ function drawCropBox() {
   edCropBox.style.top = (cr.top - wr.top + r.y * sy) + 'px';
   edCropBox.style.width = (r.w * sx) + 'px';
   edCropBox.style.height = (r.h * sy) + 'px';
+}
+function drawCropBox() {
+  const r = cropRectOf();
+  if (!r) { edCropBox.style.display = 'none'; ed.cropRect = null; return; }
+  ed.cropRect = r;
+  placeCropBox(r);
 }
 document.getElementById('ed-crop-apply').onclick = () => {
   const r = ed.cropRect;
@@ -3530,6 +3591,9 @@ edCanvas.addEventListener('pointercancel', () => {
 // ---------------- resize ----------------
 function updateResizeInfo() {
   document.getElementById('ed-rs-cur').textContent = `現在: ${edCanvas.width}×${edCanvas.height}`;
+  // 画像サイズが変わる操作（開く・回転・切抜き・リサイズ・1つ戻す）は
+  // 全てここを通るので、表示ズームも fit に戻す。
+  resetEdZoom();
   updateBrushCursor();
 }
 document.querySelectorAll('#ed-panel-resize [data-w]').forEach(b => {
