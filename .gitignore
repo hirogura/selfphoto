@@ -1,7 +1,6 @@
 # ===== フォルダ =====
 /selfphoto-data
 /thumbnail
-/icon
 # ===== Python =====
 venv/
 __pycache__/
