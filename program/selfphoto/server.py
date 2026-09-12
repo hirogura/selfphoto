@@ -1412,7 +1412,7 @@ main { padding: 0 8px 80px 228px; }
 }
 #lightbox img.zoomed { max-width: none; max-height: none; cursor: grab; }
 #lightbox .bar {
-  position: fixed; top: 0; left: 0; right: 0;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 5;
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 14px; color: #ddd; font-size: 13px;
   background: linear-gradient(rgba(0,0,0,.6), transparent);
@@ -1427,7 +1427,7 @@ main { padding: 0 8px 80px 228px; }
 #lb-del { background: #5a2326; }
 #lb-del:hover { background: #752e33; }
 #lightbox .nav {
-  position: fixed; top: 50%; transform: translateY(-50%);
+  position: fixed; top: 50%; transform: translateY(-50%); z-index: 5;
   font-size: 26px; padding: 14px 16px; opacity: .75;
 }
 #prev { left: 8px; } #next { right: 8px; }
@@ -1595,7 +1595,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
 <div id="lightbox">
-  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-zoom-out">縮小</button><button id="lb-zoom-in">拡大</button><span id="lb-zoom-label">100%</span><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
+  <div class="bar"><span id="lb-title"></span><span class="lb-actions"><button id="lb-zoom-in">拡大</button><button id="lb-zoom-out">縮小</button><span id="lb-zoom-label">100%</span><button id="lb-copy">コピー</button><button id="lb-edit">編集</button><button id="lb-del">削除</button><button id="lb-dl">ダウンロード</button><button id="lb-close">閉じる ✕</button></span></div>
   <button class="nav" id="prev">‹</button>
   <button class="nav" id="next">›</button>
   <div id="lb-content"></div>
