@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/0.7.2"
+    server_version = "selfphoto/0.8.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1182,11 +1182,18 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body.get("watch"), dict):
             if "enabled" in body["watch"]:
                 cfg["watch"]["enabled"] = bool(body["watch"]["enabled"])
+            if "mode" in body["watch"]:
+                cfg["watch"]["mode"] = str(body["watch"]["mode"])
             if "intervalSec" in body["watch"]:
                 try:
                     cfg["watch"]["intervalSec"] = int(body["watch"]["intervalSec"])
                 except (TypeError, ValueError):
                     pass
+            if "times" in body["watch"]:
+                cfg["watch"]["times"] = body["watch"]["times"]
+            if "days" in body["watch"]:
+                cfg["watch"]["days"] = body["watch"]["days"]
+            cfg["watch"] = backup.normalize_watch(cfg["watch"])
         err = backup.validate_config(cfg)
         if err:
             self.send_json({"error": err}, 400)
@@ -1448,6 +1455,22 @@ main { padding: 0 8px 80px 228px; }
 #backup-form .bk-msg.ok { color: #7ee2a8; }
 #backup-form .bk-msg.ng { color: #ff9a9a; }
 #bk-status { font-size: 13px; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+#backup-form input[type="time"] {
+  background: var(--chip); border: 1px solid #33363c; border-radius: 8px;
+  padding: 6px 8px; color: var(--fg); font-size: 13px; outline: none;
+}
+#bk-days { display: flex; gap: 6px; flex-wrap: wrap; }
+#bk-days .day-btn {
+  min-width: 34px; text-align: center; padding: 6px 8px; font-size: 13px;
+  border: 1px solid #33363c; border-radius: 8px; cursor: pointer;
+  background: var(--chip); color: var(--muted); user-select: none;
+}
+#bk-days .day-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#bk-times { display: flex; flex-direction: column; gap: 6px; }
+#bk-times .bk-time-row { display: flex; gap: 6px; align-items: center; }
+#bk-times .bk-time-row button {
+  padding: 6px 10px; font-size: 12px;
+}
 #bk-log {
   background: #0a0b0d; border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px; font-size: 11px; color: var(--muted);
@@ -1878,8 +1901,14 @@ function renderBackup() {
       <div class="bk-desc">接続エラーとコピーエラーの切り分け用。先に「接続確認」でSSH疎通を確かめられます。</div>
     </fieldset>
     <fieldset><legend>監視（自動実行）</legend>
-      <div class="bk-desc">保存・取込で写真が増えたら、選択した間隔で自動コピーします。</div>
-      <label>間隔<select id="bk-interval"></select></label>
+      <div class="bk-desc">保存・取込で写真が増えたら自動コピーします。間隔実行か、夜間などの指定時刻実行かを選べます（rsyncgui と同じ形）。</div>
+      <label>方式<select id="bk-mode"><option value="interval">間隔で実行</option><option value="time">指定時刻に実行</option></select></label>
+      <div id="bk-interval-row"><label>間隔<select id="bk-interval"></select></label></div>
+      <div id="bk-time-row" style="display:flex;flex-direction:column;gap:8px">
+        <div class="bk-row">時刻 <span id="bk-times"></span><button id="bk-time-add" type="button">+ 時刻追加</button></div>
+        <div class="bk-row">曜日 <span id="bk-days"></span></div>
+        <div class="bk-desc">指定した曜日・時刻になったときに未コピー分があれば実行します（無ければ何もしません）。</div>
+      </div>
     </fieldset>
     <div class="bk-row">
       <button id="bk-save">設定を保存</button>
@@ -1896,6 +1925,8 @@ function renderBackup() {
   document.getElementById('bk-target-check').onclick = checkTargetFolder;
   document.getElementById('bk-run').onclick = runBackupNow;
   document.getElementById('bk-watch').onclick = toggleBackupWatch;
+  document.getElementById('bk-time-add').onclick = () => { bkAddTime('12:00'); };
+  document.getElementById('bk-mode').onchange = bkUpdateModeVisibility;
   fetch('/api/backup-config').then(r => r.json()).then(j => {
     if (state.view !== 'backup') return;
     document.getElementById('bk-source').value = j.source || '';
@@ -1913,11 +1944,91 @@ function renderBackup() {
       o.value = iv; o.textContent = WATCH_LABELS[iv] || `${iv}秒ごと`;
       sel.appendChild(o);
     });
-    sel.value = String((j.watch || {}).intervalSec || 300);
+    const w = j.watch || {};
+    sel.value = String(w.intervalSec || 300);
+    document.getElementById('bk-mode').value = (w.mode === 'time') ? 'time' : 'interval';
+    bkRenderTimes(Array.isArray(w.times) && w.times.length ? w.times : ['02:00']);
+    bkRenderDays(Array.isArray(w.days) ? w.days : [0,1,2,3,4,5,6]);
+    bkUpdateModeVisibility();
     refreshBackupStatus();
   }).catch(() => {
     document.getElementById('bk-status').textContent = '設定を取得できませんでした';
   });
+}
+const BK_DAY_NAMES = ['日','月','火','水','木','金','土'];
+function bkUpdateModeVisibility() {
+  const modeEl = document.getElementById('bk-mode');
+  const mode = modeEl ? modeEl.value : 'interval';
+  const ivRow = document.getElementById('bk-interval-row');
+  const tmRow = document.getElementById('bk-time-row');
+  if (ivRow) ivRow.style.display = (mode === 'time') ? 'none' : '';
+  if (tmRow) tmRow.style.display = (mode === 'time') ? '' : 'none';
+}
+function bkRenderTimes(times) {
+  const box = document.getElementById('bk-times');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = (Array.isArray(times) && times.length ? times : ['02:00']).slice(0, 10);
+  list.forEach((t, i) => {
+    const row = document.createElement('span');
+    row.className = 'bk-time-row';
+    row.style.cssText = 'display:inline-flex;gap:4px;align-items:center;margin-right:6px;margin-bottom:4px';
+    const inp = document.createElement('input');
+    inp.type = 'time'; inp.value = t; inp.dataset.idx = String(i);
+    inp.onchange = () => {};
+    row.appendChild(inp);
+    if (list.length > 1) {
+      const del = document.createElement('button');
+      del.type = 'button'; del.textContent = '✕';
+      del.onclick = () => { row.remove(); };
+      row.appendChild(del);
+    }
+    box.appendChild(row);
+  });
+}
+function bkAddTime(v) {
+  const box = document.getElementById('bk-times');
+  if (!box) return;
+  const cur = bkCollectTimes();
+  if (cur.length >= 10) return;
+  cur.push(v || '12:00');
+  bkRenderTimes(cur);
+}
+function bkCollectTimes() {
+  const box = document.getElementById('bk-times');
+  if (!box) return ['02:00'];
+  const vals = [...box.querySelectorAll('input[type="time"]')].map(el => el.value).filter(Boolean);
+  return vals.length ? vals : ['02:00'];
+}
+function bkRenderDays(days) {
+  const box = document.getElementById('bk-days');
+  if (!box) return;
+  const set = new Set((Array.isArray(days) ? days : []).map(Number));
+  box.innerHTML = '';
+  BK_DAY_NAMES.forEach((name, i) => {
+    const b = document.createElement('span');
+    b.className = 'day-btn' + (set.has(i) ? ' on' : '');
+    b.textContent = name;
+    b.dataset.day = String(i);
+    b.onclick = () => { b.classList.toggle('on'); };
+    box.appendChild(b);
+  });
+}
+function bkCollectDays() {
+  const box = document.getElementById('bk-days');
+  if (!box) return [0,1,2,3,4,5,6];
+  const vals = [...box.querySelectorAll('.day-btn.on')].map(el => parseInt(el.dataset.day, 10));
+  return vals.length ? vals.sort() : [0,1,2,3,4,5,6];
+}
+function bkWatchSummary(w) {
+  if (!w) return '';
+  if (w.mode === 'time') {
+    const times = (w.times || ['02:00']).join(' / ');
+    const days = (w.days || []).map(d => BK_DAY_NAMES[d] || '').join('・');
+    return `指定時刻 ${days} ${times}`;
+  }
+  const iv = w.intervalSec || 300;
+  return WATCH_LABELS[iv] || `${iv}秒ごと`;
 }
 function backupFormValues() {
   return {
@@ -1931,7 +2042,12 @@ function backupFormValues() {
       key: document.getElementById('bk-ssh-key').value,
       password: document.getElementById('bk-ssh-pw').value,
     },
-    watch: { intervalSec: parseInt(document.getElementById('bk-interval').value, 10) || 300 },
+    watch: {
+      mode: document.getElementById('bk-mode').value === 'time' ? 'time' : 'interval',
+      intervalSec: parseInt(document.getElementById('bk-interval').value, 10) || 300,
+      times: bkCollectTimes(),
+      days: bkCollectDays(),
+    },
   };
 }
 async function saveBackupConfig() {
@@ -2031,7 +2147,8 @@ async function refreshBackupStatus() {
     const lastTxt = last
       ? `前回: ${last.ok ? '成功' : '失敗'}（${new Date(last.finishedAt * 1000).toLocaleString()}）`
       : '前回: まだ実行していません';
-    stEl.textContent = `監視: ${st.watching ? 'ON' : 'OFF'} / 状態: ${st.running ? '実行中…' : (st.dirty ? '未コピーあり' : '待機中')} / ${lastTxt}`;
+    const wsum = bkWatchSummary(st.watch);
+    stEl.textContent = `監視: ${st.watching ? 'ON(' + wsum + ')' : 'OFF(' + wsum + ')'} / 状態: ${st.running ? '実行中…' : (st.dirty ? '未コピーあり' : '待機中')} / ${lastTxt}`;
   }
   if (watchBtn) watchBtn.textContent = st.watching ? '監視停止' : '監視開始';
   if (logEl) logEl.textContent = (st.lastRun && st.lastRun.logTail) || '(ログなし)';
@@ -2044,7 +2161,7 @@ function updateSidebarBackup(st) {
   const lEl = document.getElementById('side-bk-last');
   const dot = document.getElementById('side-bk-dot');
   if (!wEl || !lEl || !st) return;
-  wEl.textContent = `監視: ${st.watching ? 'ON' : 'OFF'}`;
+  wEl.textContent = `監視: ${st.watching ? 'ON(' + bkWatchSummary(st.watch) + ')' : 'OFF'}`;
   const last = st.lastRun;
   lEl.textContent = last
     ? `前回: ${last.ok ? '成功' : '失敗'} ${new Date(last.finishedAt * 1000).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`

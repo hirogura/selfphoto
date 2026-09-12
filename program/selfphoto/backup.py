@@ -6,6 +6,11 @@ dirty フラグ＋間隔実行（rsyncgui の intervals と同じ方式）。
 アップロード等で dirty が立ち、ワーカースレッドが間隔ごとに
 dirty のときだけ rsync を実行する。手動の「コピー実行」はいつでも可。
 
+監視モードは rsyncgui と同じ形で2種類:
+  - interval: WATCH_INTERVALS の間隔ごとに dirty なら実行
+  - time: 指定曜日・指定時刻（times は "HH:MM" の複数可）に
+    dirty なら実行（夜間実行用。cron と同じく分単位の判定）。
+
 固定オプション: -r -t -u -v --progress（除外: .upload-tmp/）。
 """
 from __future__ import annotations
@@ -27,6 +32,13 @@ FIXED_OPTS = ["-r", "-t", "-u", "-v", "--progress"]
 EXCLUDE_UPLOAD_TMP = ".upload-tmp/"
 WATCH_INTERVALS = [60, 300, 900, 1800, 3600]
 DEFAULT_INTERVAL = 300
+# 指定時刻モードの既定値（rsyncgui と同じ形: times は "HH:MM" 複数可、
+# days は 0=日〜6=土）。
+WATCH_MODES = ("interval", "time")
+DEFAULT_TIMES = ["02:00"]
+DEFAULT_DAYS = [0, 1, 2, 3, 4, 5, 6]
+# time モードのポーリング間隔（分境界を取りこぼさないよう短めに固定）
+WATCH_TIME_POLL_SEC = 30
 
 # ローカル転送先として許可する場所。selfphoto-server.service の
 # ReadWritePaths と一致させること（PrivateTmp のため /tmp 等は不可）。
@@ -63,9 +75,68 @@ def default_config() -> dict:
         "target": "",
         "ssh": {"enabled": False, "host": "", "user": "",
                 "port": "22", "key": "", "password": ""},
-        "watch": {"enabled": False, "intervalSec": DEFAULT_INTERVAL},
+        "watch": {"enabled": False, "mode": "interval",
+                  "intervalSec": DEFAULT_INTERVAL,
+                  "times": list(DEFAULT_TIMES), "days": list(DEFAULT_DAYS)},
         "lastRun": None,
     }
+
+
+def _parse_time_str(s: str) -> tuple[int, int] | None:
+    """rsyncgui と同じ "HH:MM" 形式を (hour, minute) に変換する。"""
+    try:
+        h_s, _, m_s = str(s).strip().partition(":")
+        h, m = int(h_s), int(m_s)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= h <= 23 and 0 <= m <= 59:
+        return h, m
+    return None
+
+
+def normalize_watch(w: dict | None) -> dict:
+    """watch 設定を正規化する（旧設定の救済つき）。
+
+    rsyncgui と同じ形: {enabled, mode, intervalSec, times, days}。
+    mode 無しの旧設定は interval 扱い。
+    """
+    src = w if isinstance(w, dict) else {}
+    mode = src.get("mode", "interval")
+    if mode not in WATCH_MODES:
+        mode = "interval"
+    try:
+        iv = int(src.get("intervalSec", DEFAULT_INTERVAL))
+    except (TypeError, ValueError):
+        iv = DEFAULT_INTERVAL
+    if iv not in WATCH_INTERVALS:
+        iv = DEFAULT_INTERVAL
+    times: list[str] = []
+    raw_times = src.get("times", DEFAULT_TIMES)
+    if not isinstance(raw_times, list):
+        raw_times = [raw_times]
+    for t in raw_times:
+        if _parse_time_str(t) is not None:
+            hh, mm = _parse_time_str(t)  # type: ignore[misc]
+            times.append(f"{hh:02d}:{mm:02d}")
+        if len(times) >= 10:
+            break
+    if not times:
+        times = list(DEFAULT_TIMES)
+    days: list[int] = []
+    raw_days = src.get("days", DEFAULT_DAYS)
+    if isinstance(raw_days, list):
+        for d in raw_days:
+            try:
+                di = int(d)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= di <= 6 and di not in days:
+                days.append(di)
+    if not days:
+        days = list(DEFAULT_DAYS)
+    days.sort()
+    return {"enabled": bool(src.get("enabled", False)), "mode": mode,
+            "intervalSec": iv, "times": times, "days": days}
 
 
 def load_config() -> dict:
@@ -80,8 +151,11 @@ def load_config() -> dict:
                     cfg["ssh"].update({k: v for k, v in saved["ssh"].items()
                                        if k in cfg["ssh"]})
                 if isinstance(saved.get("watch"), dict):
-                    cfg["watch"].update({k: v for k, v in saved["watch"].items()
-                                         if k in cfg["watch"]})
+                    merged = dict(cfg["watch"])
+                    merged.update({k: v for k, v in saved["watch"].items()
+                                   if k in ("enabled", "mode", "intervalSec",
+                                            "times", "days")})
+                    cfg["watch"] = normalize_watch(merged)
     except Exception:
         pass
     return cfg
@@ -135,6 +209,15 @@ def validate_config(cfg: dict) -> str | None:
         return "bad interval"
     if iv not in WATCH_INTERVALS:
         return "bad interval"
+    w = normalize_watch(cfg.get("watch"))
+    if w["mode"] == "time":
+        if not w["times"]:
+            return "bad time"
+        for t in w["times"]:
+            if _parse_time_str(t) is None:
+                return "bad time"
+        if not w["days"] or any(d not in range(7) for d in w["days"]):
+            return "bad days"
     return None
 
 
@@ -484,10 +567,26 @@ def status() -> dict:
 
 def _current_interval() -> int:
     try:
-        iv = int(load_config()["watch"].get("intervalSec", DEFAULT_INTERVAL))
+        iv = int(normalize_watch(load_config().get("watch")).get(
+            "intervalSec", DEFAULT_INTERVAL))
     except (TypeError, ValueError):
         return DEFAULT_INTERVAL
     return iv if iv in WATCH_INTERVALS else DEFAULT_INTERVAL
+
+
+def _watch_mode() -> str:
+    try:
+        return normalize_watch(load_config().get("watch")).get("mode", "interval")
+    except Exception:
+        return "interval"
+
+
+def _time_matches(now_hm: str, now_wday: int, times: list[str], days: list[int]) -> bool:
+    """rsyncgui の cron 条件と同じ判定（曜日+時刻が一致したら True）。
+
+    now_hm は "HH:MM"、now_wday は 0=日〜6=土。
+    """
+    return now_wday in days and now_hm in times
 
 
 def _photo_max_id() -> int | None:
@@ -505,7 +604,40 @@ def _watch_loop() -> None:
     stop = _watch_stop
     # スレッド開始時点を基準にし、再起動直後の不要なコピーは避ける
     baseline = _photo_max_id()
-    while stop is not None and not stop.wait(_current_interval()):
+    last_fired_minute: str | None = None
+    while True:
+        w = normalize_watch(load_config().get("watch"))
+        poll = _current_interval() if w["mode"] == "interval" else WATCH_TIME_POLL_SEC
+        if stop is not None and stop.wait(poll):
+            break
+        if stop is None:
+            break
+        w = normalize_watch(load_config().get("watch"))
+        if w["mode"] == "time":
+            # 指定時刻モード（rsyncgui の time モードと同じ）:
+            # 曜日・時刻が一致した分の最初のポーリングでのみ発火させる。
+            # dirty/grown が無ければ rsync 自体は走らせない（無駄な走査を避ける）。
+            from datetime import datetime
+            now = datetime.now().astimezone()
+            hm = f"{now.hour:02d}:{now.minute:02d}"
+            wday = (now.weekday() + 1) % 7  # 月曜=0 → 日曜=0 換算
+            if not _time_matches(hm, wday, w["times"], w["days"]):
+                continue
+            day_min = now.strftime("%Y-%m-%d %H:%M")
+            if last_fired_minute == day_min:
+                continue
+            last_fired_minute = day_min
+            with _lock:
+                dirty = _dirty
+            cur = _photo_max_id()
+            grown = (cur is not None and baseline is not None and cur > baseline)
+            if cur is not None and baseline is not None and cur < baseline:
+                baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
+            if dirty or grown:
+                r = run_once(detail="watch-time")
+                if r.get("ok"):
+                    baseline = _photo_max_id()
+            continue
         with _lock:
             dirty = _dirty
         cur = _photo_max_id()
