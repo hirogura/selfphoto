@@ -1964,7 +1964,10 @@ function reloadBackup() {
   state.photos = []; state.offset = 0; state.done = true;
   state.selected.clear(); state.folderSel.clear(); state.monthSel.clear();
   // 写真一覧用の年月スクラバーはバックアップ画面では不要なので隠す
-  // （render→buildScrubber で他ビュー表示時に復帰する）
+  // （render→buildScrubber で他ビュー表示時に復帰する）。
+  // 参照リストも空にしないと、切り離し済み見出しの座標が 0 扱いになり
+  // スクロール時に古い年月表示（#now-viewing）が出てしまう。
+  scrubberItems = [];
   document.getElementById('scrubber').style.display = 'none';
   renderBackup();
   refreshBackupStatus();
