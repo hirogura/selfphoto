@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.3.0"
+    server_version = "selfphoto/1.3.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2052,7 +2052,9 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="lb-edit">編集</button>
     <button id="lb-del">削除</button>
     <button id="lb-newtab">新タブ</button>
-    <button id="lb-dl">ダウンロード</button>
+    <button id="lb-dl">DL</button>
+    <button id="lb-prev">←</button>
+    <button id="lb-next">→</button>
     <div class="rail-spacer"></div>
     <button id="lb-close">閉じる</button>
   </div>
@@ -3148,6 +3150,8 @@ document.getElementById('lb-del').onclick = async () => {
 };
 document.getElementById('prev').onclick = () => moveLb(-1);
 document.getElementById('next').onclick = () => moveLb(1);
+document.getElementById('lb-prev').onclick = (e) => { e.stopPropagation(); moveLb(-1); };
+document.getElementById('lb-next').onclick = (e) => { e.stopPropagation(); moveLb(1); };
 document.addEventListener('keydown', e => {
   if (!lb.classList.contains('open')) return;
   if (e.key === 'Escape') document.getElementById('lb-close').click();
