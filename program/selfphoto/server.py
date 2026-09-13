@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.1.1"
+    server_version = "selfphoto/1.1.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3513,31 +3513,51 @@ document.getElementById('ed-crop-clear').onclick = () => {
 };
 
 // ---------------- mosaic / blur brush ----------------
+// モザイクは画像原点に固定したグリッドで区切り、1ストローク中に塗った
+// ブロックは再計算しない。ドラッグで重ね塗りしても、既にモザイク化された
+// 画素をさらに平均化しないため、ブロック状が保たれる（ぼかし状にならない）。
 function paintMosaic(cx, cy, radius, block) {
-  const x0 = Math.max(0, Math.floor(cx - radius)), y0 = Math.max(0, Math.floor(cy - radius));
-  const x1 = Math.min(edCanvas.width, Math.ceil(cx + radius)), y1 = Math.min(edCanvas.height, Math.ceil(cy + radius));
+  const B = Math.max(1, Math.round(block));
+  if (!ed.mosaicDone) ed.mosaicDone = new Set();
+  // 作業範囲はブロック境界に合わせる（中途半端な塗りを残さない）
+  const x0 = Math.max(0, Math.floor((cx - radius) / B) * B);
+  const y0 = Math.max(0, Math.floor((cy - radius) / B) * B);
+  const x1 = Math.min(edCanvas.width, Math.ceil((cx + radius) / B) * B);
+  const y1 = Math.min(edCanvas.height, Math.ceil((cy + radius) / B) * B);
   const W = x1 - x0, H = y1 - y0;
   if (W <= 0 || H <= 0) return;
   const img = edCtx.getImageData(x0, y0, W, H);
-  const d = img.data, w = img.width, h = img.height;
-  for (let by = 0; by < h; by += block) {
-    for (let bx = 0; bx < w; bx += block) {
-      const px = x0 + bx + block / 2 - cx, py = y0 + by + block / 2 - cy;
-      if (px * px + py * py > radius * radius) continue;
-      let r = 0, g = 0, b = 0, n = 0;
-      const xe = Math.min(bx + block, w), ye = Math.min(by + block, h);
-      for (let y = by; y < ye; y++) for (let x = bx; x < xe; x++) {
-        const i = (y * w + x) * 4;
-        r += d[i]; g += d[i + 1]; b += d[i + 2]; n++;
+  const d = img.data;
+  const fills = [];
+  const gx0 = x0 / B, gy0 = y0 / B;
+  const gx1 = Math.floor((x1 - 1) / B), gy1 = Math.floor((y1 - 1) / B);
+  for (let gy = gy0; gy <= gy1; gy++) {
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const key = gx + ',' + gy;
+      if (ed.mosaicDone.has(key)) continue;
+      const bcx = gx * B + B / 2, bcy = gy * B + B / 2;
+      const dx = bcx - cx, dy = bcy - cy;
+      if (dx * dx + dy * dy > radius * radius) continue;
+      const px0 = gx * B, py0 = gy * B;
+      const px1 = Math.min(px0 + B, x1), py1 = Math.min(py0 + B, y1);
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let y = py0; y < py1; y++) {
+        const row = (y - y0) * W;
+        for (let x = px0; x < px1; x++) {
+          const i = (row + (x - x0)) * 4;
+          r += d[i]; g += d[i + 1]; b += d[i + 2]; a += d[i + 3]; n++;
+        }
       }
-      r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
-      for (let y = by; y < ye; y++) for (let x = bx; x < xe; x++) {
-        const i = (y * w + x) * 4;
-        d[i] = r; d[i + 1] = g; d[i + 2] = b;
-      }
+      if (!n) continue;
+      ed.mosaicDone.add(key);
+      fills.push({ x: px0, y: py0, w: px1 - px0, h: py1 - py0,
+                   c: `rgba(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)},${(a / n / 255).toFixed(3)})` });
     }
   }
-  edCtx.putImageData(img, x0, y0);
+  for (const f of fills) {
+    edCtx.fillStyle = f.c;
+    edCtx.fillRect(f.x, f.y, f.w, f.h);
+  }
 }
 function paintBlur(cx, cy, radius, rad) {
   const x0 = Math.max(0, Math.floor(cx - radius - rad)), y0 = Math.max(0, Math.floor(cy - radius - rad));
@@ -3609,6 +3629,7 @@ edCanvas.addEventListener('pointerdown', e => {
   } else if (ed.tool === 'mosaic' || ed.tool === 'blur') {
     edPushHistory();
     ed.painting = true; ed.lastPt = pt;
+    ed.mosaicDone = new Set(); // この1ストロークで塗ったモザイク枡の記録
     paintStroke(pt.x, pt.y, pt.x, pt.y);
   } else if (ed.tool === 'rect' || ed.tool === 'arrow') {
     edPushHistory();
@@ -3713,11 +3734,11 @@ edCanvas.addEventListener('pointerup', () => {
     else { ed.history.pop(); updateUndoButton(); }
     ed.shapeDrag = null; ed.dragSnap = null;
   }
-  ed.cropDrag = null; ed.painting = false; ed.lastPt = null;
+  ed.cropDrag = null; ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
 });
 edCanvas.addEventListener('pointercancel', () => {
   cancelShape(true);
-  ed.cropDrag = null; ed.painting = false; ed.lastPt = null;
+  ed.cropDrag = null; ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
 });
 
 // ---------------- resize ----------------
