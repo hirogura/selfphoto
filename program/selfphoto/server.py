@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.1.2"
+    server_version = "selfphoto/1.2.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2072,6 +2072,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <button id="ed-rot-r">右回転</button>
       <button data-tool="rect">赤枠挿入</button>
       <button data-tool="arrow">矢印挿入</button>
+      <button data-tool="pen">自由線</button>
       <button data-tool="crop">トリミング</button>
       <button data-tool="mosaic">モザイク</button>
       <button data-tool="blur">ぼかし</button>
@@ -2084,6 +2085,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <div class="ed-panel" id="ed-panel-arrow">
         <div class="ed-hint">ドラッグした方向・長さで赤矢印</div>
         <label>太さ <input type="range" id="ed-arrow-width" min="1" max="5" step="1" value="3"><span id="ed-arrow-width-v">3</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-pen">
+        <div class="ed-hint">ドラッグした軌跡に赤色の自由線</div>
+        <label>太さ <input type="range" id="ed-pen-width" min="1" max="5" step="1" value="3"><span id="ed-pen-width-v">3</span></label>
       </div>
       <div class="ed-panel" id="ed-panel-crop">
         <label><input type="radio" name="ed-ratio" value="keep" checked> 比率維持</label>
@@ -3425,7 +3430,8 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
 });
 [['ed-mosaic-strength', 'ed-mosaic-strength-v'], ['ed-mosaic-size', 'ed-mosaic-size-v'],
  ['ed-blur-strength', 'ed-blur-strength-v'], ['ed-blur-size', 'ed-blur-size-v'],
- ['ed-rect-width', 'ed-rect-width-v'], ['ed-arrow-width', 'ed-arrow-width-v']].forEach(([a, b]) => {
+  ['ed-rect-width', 'ed-rect-width-v'], ['ed-arrow-width', 'ed-arrow-width-v'],
+  ['ed-pen-width', 'ed-pen-width-v']].forEach(([a, b]) => {
   document.getElementById(a).addEventListener('input', e => {
     document.getElementById(b).textContent = e.target.value;
     updateBrushCursor();
@@ -3631,18 +3637,22 @@ edCanvas.addEventListener('pointerdown', e => {
     ed.painting = true; ed.lastPt = pt;
     ed.mosaicDone = new Set(); // この1ストロークで塗ったモザイク枡の記録
     paintStroke(pt.x, pt.y, pt.x, pt.y);
-  } else if (ed.tool === 'rect' || ed.tool === 'arrow') {
+  } else if (ed.tool === 'rect' || ed.tool === 'arrow' || ed.tool === 'pen') {
     edPushHistory();
     ed.dragSnap = snapEdCanvas();
-    ed.shapeDrag = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+    ed.shapeDrag = ed.tool === 'pen'
+      ? { pts: [{ x: pt.x, y: pt.y }] }
+      : { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
   }
 });
 
-// ---------------- rect / arrow shape ----------------
+// ---------------- rect / arrow / pen shape ----------------
 // ドラッグ中はスナップショットに戻してから図形を描く（プレビュー）。
 // 指を離したときに確定する。小さすぎるドラッグは無効として履歴も戻す。
 function edLineWidth() {
-  const el = document.getElementById(ed.tool === 'arrow' ? 'ed-arrow-width' : 'ed-rect-width');
+  const id = ed.tool === 'arrow' ? 'ed-arrow-width'
+    : ed.tool === 'pen' ? 'ed-pen-width' : 'ed-rect-width';
+  const el = document.getElementById(id);
   const idx = Math.max(0, Math.min(4, (parseInt(el && el.value, 10) || 3) - 1));
   return ed.lineWidths[idx];
 }
@@ -3693,8 +3703,23 @@ function drawArrowShape(g, x0, y0, x1, y1, lw) {
   g.fill();
   return true;
 }
+function drawPenShape(g, s, lw) {
+  const pts = s && s.pts;
+  if (!pts || pts.length < 1) return false;
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  if (len < 5) return false;
+  g.strokeStyle = '#ff0000';
+  g.lineWidth = lw; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath();
+  g.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+  g.stroke();
+  return true;
+}
 function drawShape(g, s) {
   const lw = edLineWidth();
+  if (ed.tool === 'pen') return drawPenShape(g, s, lw);
   if (ed.tool === 'rect') {
     const x = Math.min(s.x0, s.x1), y = Math.min(s.y0, s.y1);
     const w = Math.abs(s.x1 - s.x0), h = Math.abs(s.y1 - s.y0);
@@ -3725,6 +3750,14 @@ edCanvas.addEventListener('pointermove', e => {
   } else if (ed.shapeDrag && (ed.tool === 'rect' || ed.tool === 'arrow')) {
     ed.shapeDrag.x1 = pt.x; ed.shapeDrag.y1 = pt.y;
     previewShape();
+  } else if (ed.shapeDrag && ed.tool === 'pen') {
+    const pts = ed.shapeDrag.pts;
+    const last = pts[pts.length - 1];
+    // 近すぎる点は間引く（履歴・描画の肥大化防止）
+    if (Math.hypot(pt.x - last.x, pt.y - last.y) >= 2) {
+      pts.push({ x: pt.x, y: pt.y });
+      previewShape();
+    }
   }
 });
 edCanvas.addEventListener('pointerup', () => {
