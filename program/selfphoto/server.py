@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.2.0"
+    server_version = "selfphoto/1.3.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2051,6 +2051,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="lb-copy">コピー</button>
     <button id="lb-edit">編集</button>
     <button id="lb-del">削除</button>
+    <button id="lb-newtab">新タブ</button>
     <button id="lb-dl">ダウンロード</button>
     <div class="rail-spacer"></div>
     <button id="lb-close">閉じる</button>
@@ -3101,6 +3102,12 @@ document.getElementById('lb-dl').onclick = async () => {
   const p = state.photos[lbIndex];
   if (!p) return;
   await downloadUrl(p.original, p.filename);
+};
+document.getElementById('lb-newtab').onclick = (e) => {
+  e.stopPropagation();
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  window.open(p.original, '_blank', 'noopener');
 };
 document.getElementById('lb-del').onclick = async () => {
   const p = state.photos[lbIndex];
