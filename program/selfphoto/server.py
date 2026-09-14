@@ -2449,7 +2449,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <label>色温度 <input type="range" id="ed-adj-colortemp" data-adjust="colortemp" min="-100" max="100" step="1" value="0"><span id="ed-adj-colortemp-v">0</span></label>
       </div>
       <div class="ed-panel" id="ed-panel-tint">
-        <div class="ed-hint">グリーンとマゼンタのバランスを調整（右でグリーン寄り）</div>
+        <div class="ed-hint">グリーンとマゼンタのバランスを調整（右でマゼンタ寄り）</div>
         <label>色合い <input type="range" id="ed-adj-tint" data-adjust="tint" min="-100" max="100" step="1" value="0"><span id="ed-adj-tint-v">0</span></label>
       </div>
       <div class="ed-panel" id="ed-panel-resize">
@@ -3994,7 +3994,8 @@ function applyAdjustPixels(d, a) {
   const cLUT = new Uint8ClampedArray(256);
   for (let i = 0; i < 256; i++) cLUT[i] = (i - 128) * cf + 128;
   const rG = 1 + 0.28 * tp, bG = 1 - 0.28 * tp;
-  const gOff = 40 * tn;
+  // 色合いは Lightroom と同じ向き（右=マゼンタ寄り、左=グリーン寄り）
+  const gOff = -40 * tn;
   const satF = 1 + st;
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i] * rG, g = d[i + 1] + gOff, b = d[i + 2] * bG;
