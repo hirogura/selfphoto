@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.4.0"
+    server_version = "selfphoto/1.4.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3436,7 +3436,7 @@ function showLb() {
         el.src = el.dataset.full;
       }
     };
-    el.ondblclick = () => toggleLbZoom();
+    el.ondblclick = () => document.getElementById('lb-close').click();
     el.src = el.dataset.isFull === '0' ? el.dataset.preview : el.dataset.full;
   }
   lbContent.appendChild(el);
@@ -3483,13 +3483,6 @@ function stepLbZoom(dir) {
   const next = Math.min(LB_ZOOM_STEPS.length - 1, Math.max(0, lbZoomIdx + dir));
   if (next === lbZoomIdx) return;
   lbZoomIdx = next;
-  applyLbZoom();
-}
-function toggleLbZoom() {
-  if (!lbContent.querySelector('img')) return;
-  const toZoom = (lbZoomIdx === LB_ZOOM_FIT);
-  lbZoomIdx = toZoom ? LB_ZOOM_FIT + 2 : LB_ZOOM_FIT;
-  if (toZoom) upgradeLbToOriginal();
   applyLbZoom();
 }
 // プレビュー表示中ならオリジナル画像に切り替える（拡大時の高画質化）。
