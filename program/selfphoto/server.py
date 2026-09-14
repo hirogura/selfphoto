@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.4.2"
+    server_version = "selfphoto/1.5.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2392,6 +2392,12 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <button data-tool="crop">トリミング</button>
       <button data-tool="mosaic">モザイク</button>
       <button data-tool="blur">ぼかし</button>
+      <button data-tool="shadow">シャドウ</button>
+      <button data-tool="highlight">ハイライト</button>
+      <button data-tool="contrast">コントラスト</button>
+      <button data-tool="saturation">彩度</button>
+      <button data-tool="colortemp">色温度</button>
+      <button data-tool="tint">色合い</button>
       <button data-tool="resize">リサイズ</button>
       <button id="ed-rename">リネーム</button>
       <div class="ed-panel" id="ed-panel-rect">
@@ -2421,6 +2427,30 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <div class="ed-hint">塗った場所をぼかし</div>
         <label>強度 <input type="range" id="ed-blur-strength" min="1" max="5" step="1" value="3"><span id="ed-blur-strength-v">3</span></label>
         <label>太さ <input type="range" id="ed-blur-size" min="1" max="5" step="1" value="3"><span id="ed-blur-size-v">3</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-shadow">
+        <div class="ed-hint">暗い部分だけ調整（右で明るく）</div>
+        <label>シャドウ <input type="range" id="ed-adj-shadow" data-adjust="shadow" min="-100" max="100" step="1" value="0"><span id="ed-adj-shadow-v">0</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-highlight">
+        <div class="ed-hint">明るい部分だけ調整（右で明るく）</div>
+        <label>ハイライト <input type="range" id="ed-adj-highlight" data-adjust="highlight" min="-100" max="100" step="1" value="0"><span id="ed-adj-highlight-v">0</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-contrast">
+        <div class="ed-hint">明暗の差を調整（右で強調）</div>
+        <label>コントラスト <input type="range" id="ed-adj-contrast" data-adjust="contrast" min="-100" max="100" step="1" value="0"><span id="ed-adj-contrast-v">0</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-saturation">
+        <div class="ed-hint">色の濃さを調整（右で濃く）</div>
+        <label>彩度 <input type="range" id="ed-adj-saturation" data-adjust="saturation" min="-100" max="100" step="1" value="0"><span id="ed-adj-saturation-v">0</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-colortemp">
+        <div class="ed-hint">色温度を調整（右で高く・暖かく）</div>
+        <label>色温度 <input type="range" id="ed-adj-colortemp" data-adjust="colortemp" min="-100" max="100" step="1" value="0"><span id="ed-adj-colortemp-v">0</span></label>
+      </div>
+      <div class="ed-panel" id="ed-panel-tint">
+        <div class="ed-hint">グリーンとマゼンタのバランスを調整（右でグリーン寄り）</div>
+        <label>色合い <input type="range" id="ed-adj-tint" data-adjust="tint" min="-100" max="100" step="1" value="0"><span id="ed-adj-tint-v">0</span></label>
       </div>
       <div class="ed-panel" id="ed-panel-resize">
         <div class="ed-hint">いずれか1つを入力（縦横比は維持）</div>
@@ -3626,7 +3656,8 @@ const ed = { tool: null, path: '', filename: '', dirty: false, cropRect: null, c
   brushSizes: [12, 24, 48, 96, 192],
   mosaicBlocks: [4, 8, 16, 32, 64],
   blurRadii: [2, 5, 10, 20, 40],
-  lineWidths: [4, 8, 16, 32, 64] };
+  lineWidths: [4, 8, 16, 32, 64],
+  adjust: null, adjustBaseData: null };
 
 function openEditor() {
   const p = state.photos[lbIndex];
@@ -3636,6 +3667,7 @@ function openEditor() {
   ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null;
   ed.shapeDrag = null; ed.dragSnap = null;
   ed.history = []; updateUndoButton();
+  edAdjustReset();
   document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(x => x.classList.remove('on'));
   document.querySelectorAll('#editor .ed-panel').forEach(x => x.classList.remove('on'));
   edCropBox.style.display = 'none';
@@ -3656,6 +3688,7 @@ function closeEditor(force) {
   document.getElementById('editor').classList.remove('open');
   syncBodyScroll();
   ed.tool = null; ed.dirty = false; ed.cropRect = null;
+  ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
 document.getElementById('lb-copy').onclick = () => {
@@ -3740,6 +3773,7 @@ function rotateEdCanvas(dir) {
   edCtx.drawImage(c, 0, 0);
   ed.cropRect = null; edCropBox.style.display = 'none';
   cancelShape(false);
+  edAdjustReset();
   ed.dirty = true; updateResizeInfo();
 }
 document.getElementById('ed-rot-l').onclick = () => rotateEdCanvas(-1);
@@ -3820,6 +3854,7 @@ function updateUndoButton() {
 document.getElementById('ed-undo').onclick = () => {
   const url = ed.history && ed.history.pop();
   updateUndoButton();
+  edAdjustReset();
   if (!url) return;
   const img = new Image();
   img.onload = () => {
@@ -3888,6 +3923,9 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
       .forEach(x => x.classList.toggle('on', x.id === 'ed-panel-' + ed.tool));
     edCropBox.style.display = 'none'; ed.cropRect = null;
     cancelShape(true);
+    // 調整ツール以外に移ったら調整の基準スナップショットを捨てる
+    // （古い基準に古いスライダー値を重ね掛けしないため）
+    if (!ed.tool || ED_ADJUST_TOOLS.indexOf(ed.tool) < 0) edAdjustReset();
     updateBrushCursor();
   };
 });
@@ -3901,6 +3939,97 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
   });
 });
 window.addEventListener('resize', updateBrushCursor);
+
+// ---------------- tone adjust ----------------
+// シャドウ / ハイライト / コントラスト / 彩度 / 色温度 / 色合いの
+// スライダー調整（-100〜+100、中央 0）。スライダーを動かすと
+// 調整前のキャンバスを基準スナップショットに保持し、そこから全項目を
+// かけ直してリアルタイムに反映する（連続ドラッグ中は rAF で間引き）。
+// 回転・切抜き・リサイズ・筆操作・1つ戻す・ツール切替で基準は破棄され、
+// スライダーは 0 に戻る。保存時には表示中の内容がそのまま使われる。
+const ED_ADJUST_TOOLS = ['shadow', 'highlight', 'contrast', 'saturation', 'colortemp', 'tint'];
+function edAdjustReset() {
+  ed.adjustBaseData = null;
+  if (!ed.adjust) ed.adjust = {};
+  for (const k of ED_ADJUST_TOOLS) ed.adjust[k] = 0;
+  document.querySelectorAll('#editor input[type="range"][data-adjust]').forEach(el => {
+    el.value = 0;
+    const v = document.getElementById(el.id + '-v');
+    if (v) v.textContent = '0';
+  });
+}
+function ensureAdjustBase() {
+  if (ed.adjustBaseData || !edCanvas.width || !edCanvas.height) return;
+  edPushHistory();
+  try {
+    ed.adjustBaseData = edCtx.getImageData(0, 0, edCanvas.width, edCanvas.height);
+  } catch (err) {
+    ed.adjustBaseData = null;
+    alert('画像が大きすぎるため調整できません');
+  }
+}
+let adjustQueued = false;
+function queueAdjustApply() {
+  if (adjustQueued) return;
+  adjustQueued = true;
+  requestAnimationFrame(() => { adjustQueued = false; applyAdjustments(); });
+}
+function applyAdjustments() {
+  const base = ed.adjustBaseData;
+  if (!base || !edCanvas.width || !edCanvas.height) return;
+  if (base.width !== edCanvas.width || base.height !== edCanvas.height) return;
+  const out = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+  applyAdjustPixels(out.data, ed.adjust || {});
+  edCtx.putImageData(out, 0, 0);
+}
+function applyAdjustPixels(d, a) {
+  const sh = ((a.shadow || 0)) / 100;
+  const hi = ((a.highlight || 0)) / 100;
+  const st = ((a.saturation || 0)) / 100;
+  const tp = ((a.colortemp || 0)) / 100;
+  const tn = ((a.tint || 0)) / 100;
+  // コントラストは 256 階調 LUT に畳む
+  const cc = (a.contrast || 0) * 2.55;
+  const cf = (259 * (cc + 255)) / (255 * (259 - cc));
+  const cLUT = new Uint8ClampedArray(256);
+  for (let i = 0; i < 256; i++) cLUT[i] = (i - 128) * cf + 128;
+  const rG = 1 + 0.28 * tp, bG = 1 - 0.28 * tp;
+  const gOff = 40 * tn;
+  const satF = 1 + st;
+  for (let i = 0; i < d.length; i += 4) {
+    let r = d[i] * rG, g = d[i + 1] + gOff, b = d[i + 2] * bG;
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    if (sh !== 0) {
+      let w = 1 - lum; w *= w;
+      if (sh > 0) { r += (255 - r) * sh * w; g += (255 - g) * sh * w; b += (255 - b) * sh * w; }
+      else { const m = 1 + sh * w; r *= m; g *= m; b *= m; }
+    }
+    if (hi !== 0) {
+      const w = lum * lum;
+      if (hi > 0) { r += (255 - r) * hi * w; g += (255 - g) * hi * w; b += (255 - b) * hi * w; }
+      else { const m = 1 + hi * w; r *= m; g *= m; b *= m; }
+    }
+    r = cLUT[r < 0 ? 0 : (r > 255 ? 255 : Math.round(r))];
+    g = cLUT[g < 0 ? 0 : (g > 255 ? 255 : Math.round(g))];
+    b = cLUT[b < 0 ? 0 : (b > 255 ? 255 : Math.round(b))];
+    if (st !== 0) {
+      const y = 0.299 * r + 0.587 * g + 0.114 * b;
+      r = y + (r - y) * satF; g = y + (g - y) * satF; b = y + (b - y) * satF;
+    }
+    d[i] = r; d[i + 1] = g; d[i + 2] = b;
+  }
+}
+document.querySelectorAll('#editor input[type="range"][data-adjust]').forEach(el => {
+  el.addEventListener('input', () => {
+    const v = Math.max(-100, Math.min(100, parseInt(el.value, 10) || 0));
+    const lbl = document.getElementById(el.id + '-v');
+    if (lbl) lbl.textContent = String(v);
+    if (!ed.adjust) ed.adjust = {};
+    ed.adjust[el.dataset.adjust] = v;
+    ensureAdjustBase();
+    if (ed.adjustBaseData) { ed.dirty = true; queueAdjustApply(); }
+  });
+});
 
 // ---------------- brush cursor ----------------
 // モザイク・ぼかし選択中は、写真上のカーソルを「太さ」と同じ直径の円にする
@@ -3975,6 +4104,7 @@ document.getElementById('ed-crop-apply').onclick = () => {
   edCanvas.width = r.w; edCanvas.height = r.h;
   edCtx.drawImage(c, 0, 0);
   ed.cropRect = null; edCropBox.style.display = 'none';
+  edAdjustReset();
   ed.dirty = true; updateResizeInfo();
 };
 document.getElementById('ed-crop-clear').onclick = () => {
@@ -4276,6 +4406,7 @@ document.getElementById('ed-rs-apply').onclick = () => {
   edCanvas.width = tw; edCanvas.height = th;
   edCtx.imageSmoothingQuality = 'high';
   edCtx.drawImage(c, 0, 0);
+  edAdjustReset();
   ed.dirty = true; updateResizeInfo();
 };
 
