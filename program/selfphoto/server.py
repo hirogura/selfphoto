@@ -3257,7 +3257,6 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(
 window.addEventListener('scroll', () => hideCtxMenu(), { passive: true });
 async function rotateThumbPhoto(p, dir) {
   if (p.isVideo) { alert('動画の回転には対応していません'); return; }
-  if (!confirm(`「${p.filename}」を${dir === 'left' ? '左' : '右'}に90度回転しますか？`)) return;
   let j = null;
   try {
     const r = await fetch('/api/rotate', {
