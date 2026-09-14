@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.3.1"
+    server_version = "selfphoto/1.4.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -296,6 +296,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_edit_saveas()
             elif path == "/api/rename":
                 self.api_rename()
+            elif path == "/api/rotate":
+                self.api_rotate()
             elif path == "/api/backup-run":
                 self.api_backup_run()
             elif path == "/api/backup-watch":
@@ -1367,6 +1369,283 @@ class Handler(BaseHTTPRequestHandler):
             pass
         self.send_json({"ok": True, "path": new_rel, "filename": new_name})
 
+    def api_rotate(self) -> None:
+        """元画像を90度回転して上書き保存する（EXIF維持・サムネイル更新）。
+
+        POST /api/rotate {"path": "2026/202609/20260911_/IMG_0001.jpg",
+                          "dir": "left" | "right"}
+        left=反時計回り90度、right=時計回り90度。
+        "edit/<名>" は編集フォルダ内を対象にする（DB なし・サムネイルキャッシュ削除）。
+        動画は対象外。
+        """
+        from . import exif as exif_mod
+        from . import ingest
+
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        rel = body.get("path") if isinstance(body.get("path"), str) else ""
+        rel = (rel or "").strip()
+        direction = body.get("dir") if isinstance(body.get("dir"), str) else ""
+        direction = (direction or "").strip().lower()
+        if direction not in ("left", "right"):
+            self.send_json({"error": "dir must be left or right"}, 400)
+            return
+        if not rel:
+            self.send_json({"error": "path required"}, 400)
+            return
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            self.send_json({"error": "Pillow not available"}, 500)
+            return
+
+        def rotate_file(src: Path) -> tuple[int | None, int | None]:
+            """src を90度回転して同形式で上書き保存する。EXIF は維持する。
+
+            戻り値は (width, height)。失敗時は例外を投げる。
+            """
+            suffix = src.suffix.lower()
+            # 回転前に元画像の EXIF（撮影日時・メーカー・モデル）を読む。
+            # Pillow の EXIF 引き継ぎが落ちた場合のフォールバック用（JPEG のみ）。
+            try:
+                src_tags = exif_mod.edit_source_tags(src)
+            except Exception:
+                src_tags = {"datetime": None, "make": None, "model": None}
+            try:
+                icc = None
+                try:
+                    with Image.open(src) as _probe:
+                        icc = _probe.info.get("icc_profile")
+                except Exception:
+                    icc = None
+            except Exception:
+                icc = None
+            with Image.open(src) as im:
+                orig_format = (im.format or "").upper()
+                # Exif Orientation を正規化してから回転する
+                try:
+                    im = ImageOps.exif_transpose(im)
+                except Exception:
+                    pass
+                if im is None:
+                    raise ValueError("exif_transpose failed")
+                op = Image.ROTATE_90 if direction == "left" else Image.ROTATE_270
+                # アニメGIFは全フレームを回転する
+                is_animated_gif = (
+                    suffix == ".gif"
+                    and getattr(im, "format", "") == "GIF"
+                    and getattr(im, "n_frames", 1) > 1
+                )
+                if is_animated_gif:
+                    frames = []
+                    try:
+                        n = im.n_frames
+                    except Exception:
+                        n = 1
+                    for i in range(n):
+                        try:
+                            im.seek(i)
+                        except Exception:
+                            break
+                        f = ImageOps.exif_transpose(im.copy())
+                        frames.append(f.transpose(op))
+                    if not frames:
+                        raise ValueError("gif decode failed")
+                    tmp = src.with_name(src.name + ".rotate-tmp")
+                    first, rest = frames[0], frames[1:]
+                    first.save(tmp, format="GIF", save_all=True,
+                               append_images=rest, loop=0)
+                    os.replace(tmp, src)
+                    return frames[0].size
+                im = im.transpose(op)
+                # EXIF は Orientation=1（正位置）に正規化して引き継ぐ
+                exif_bytes = None
+                try:
+                    ex = im.getexif()
+                    if ex is not None and len(ex) > 0:
+                        try:
+                            ex[0x0112] = 1
+                        except Exception:
+                            pass
+                        exif_bytes = ex.tobytes()
+                except Exception:
+                    exif_bytes = None
+                if exif_bytes is None:
+                    try:
+                        exif_bytes = im.info.get("exif")
+                    except Exception:
+                        exif_bytes = None
+                tmp = src.with_name(src.name + ".rotate-tmp")
+                try:
+                    if suffix in (".jpg", ".jpeg"):
+                        if im.mode in ("RGBA", "LA", "PA", "P"):
+                            im = im.convert("RGB")
+                        kw: dict = {"format": "JPEG", "quality": 95,
+                                    "subsampling": 1}
+                        if exif_bytes:
+                            kw["exif"] = exif_bytes
+                        if icc:
+                            kw["icc_profile"] = icc
+                        im.save(tmp, **kw)
+                    elif suffix == ".png":
+                        kw = {"format": "PNG", "optimize": True}
+                        if exif_bytes:
+                            kw["exif"] = exif_bytes
+                        if icc:
+                            kw["icc_profile"] = icc
+                        im.save(tmp, **kw)
+                    elif suffix == ".webp":
+                        kw = {"format": "WEBP", "quality": 92, "method": 4}
+                        if exif_bytes:
+                            kw["exif"] = exif_bytes
+                        if icc:
+                            kw["icc_profile"] = icc
+                        im.save(tmp, **kw)
+                    elif suffix in (".tif", ".tiff"):
+                        kw = {"format": "TIFF"}
+                        if exif_bytes:
+                            kw["exif"] = exif_bytes
+                        im.save(tmp, **kw)
+                    elif suffix == ".bmp":
+                        im.save(tmp, format="BMP")
+                    elif suffix == ".gif":
+                        im.save(tmp, format="GIF")
+                    else:
+                        # heic/heif/avif 等: 元フォーマットで保存を試みる
+                        fmt = orig_format or suffix.lstrip(".").upper()
+                        kw = {"format": fmt}
+                        if exif_bytes and fmt in ("JPEG", "PNG", "WEBP", "TIFF"):
+                            kw["exif"] = exif_bytes
+                        if fmt == "JPEG":
+                            if im.mode in ("RGBA", "LA", "PA", "P"):
+                                im = im.convert("RGB")
+                            kw.setdefault("quality", 95)
+                        im.save(tmp, **kw)
+                except Exception:
+                    try:
+                        if tmp.is_file():
+                            tmp.unlink()
+                    except OSError:
+                        pass
+                    raise
+                os.replace(tmp, src)
+                # JPEG は Pillow の EXIF 引き継ぎが落ちることがあるため、
+                # 撮影日時が消えていたら日時・メーカー・モデルだけ補う
+                if suffix in (".jpg", ".jpeg"):
+                    try:
+                        head = src.read_bytes()[:2]
+                    except OSError:
+                        head = b""
+                    if head == b"\xff\xd8" and src_tags.get("datetime"):
+                        try:
+                            cur = exif_mod.edit_source_tags(src)
+                        except Exception:
+                            cur = {"datetime": None}
+                        if not cur.get("datetime"):
+                            exif_mod.inject_exif_into_jpeg(
+                                src, src_tags["datetime"],
+                                src_tags.get("make"), src_tags.get("model"))
+                return im.size[0], im.size[1]
+
+        if rel.startswith("edit/"):
+            name = rel[len("edit/"):]
+            dst = safe_join(common.EDIT_PHOTO_DIR, name)
+            if dst is None or "/" in name or not dst.is_file():
+                self.send_json({"error": "photo not found"}, 404)
+                return
+            if dst.suffix.lower() in common.VIDEO_EXTS:
+                self.send_json({"error": "video not supported"}, 400)
+                return
+            try:
+                rotate_file(dst)
+            except Exception as e:  # noqa: BLE001
+                self.send_json({"error": f"rotate failed: {e}"}, 500)
+                return
+            cache = common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp")
+            try:
+                if cache.is_file():
+                    cache.unlink()
+            except OSError:
+                pass
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
+            try:
+                v = int(dst.stat().st_mtime)
+            except OSError:
+                v = int(time.time())
+            self.send_json({
+                "ok": True, "path": rel, "filename": dst.name,
+                "thumb": f"/editthumb/{name}?v={v}",
+                "original": f"/editphoto/{name}?v={v}",
+            })
+            return
+        dst = safe_join(common.PHOTO_DIR, rel)
+        if dst is None or not dst.is_file():
+            self.send_json({"error": "photo not found"}, 404)
+            return
+        if dst.suffix.lower() in common.VIDEO_EXTS:
+            self.send_json({"error": "video not supported"}, 400)
+            return
+        try:
+            rotate_file(dst)
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": f"rotate failed: {e}"}, 500)
+            return
+        conn = common.get_db()
+        try:
+            size = exif_mod.image_size(dst)
+        except Exception:
+            size = None
+        try:
+            st = dst.stat()
+        except OSError as e:
+            self.send_json({"error": str(e)}, 500)
+            return
+        conn.execute(
+            """UPDATE photos SET size=?, mtime=?, hash=?,
+                      width=?, height=?, thumb_done=0 WHERE path=?""",
+            (st.st_size, st.st_mtime, ingest.file_hash_of(dst),
+             size[0] if size else None, size[1] if size else None, rel),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM photos WHERE path=?", (rel,)).fetchone()
+        if row and row["thumb_path"]:
+            old = safe_join(common.THUMB_DIR, row["thumb_path"])
+            try:
+                if old is not None and old.is_file():
+                    old.unlink()
+            except OSError:
+                pass
+        if row:
+            ingest.make_thumbnail(row)
+        stale_view = safe_join(
+            common.VIEW_DIR, Path(rel).with_suffix("").as_posix() + "_view.webp")
+        try:
+            if stale_view is not None and stale_view.is_file():
+                stale_view.unlink()
+        except OSError:
+            pass
+        try:
+            from . import backup
+            backup.mark_dirty()
+        except Exception:
+            pass
+        v = int(st.st_mtime)
+        self.send_json({
+            "ok": True, "path": rel, "filename": dst.name,
+            "width": size[0] if size else None,
+            "height": size[1] if size else None,
+            "size": st.st_size, "mtime": v,
+            "thumb": f"/thumb/{Path(rel).with_suffix('').as_posix()}_thumb.webp?v={v}",
+            "view": f"/view/{ingest.view_rel_path(rel)}?v={v}",
+            "original": f"/photo/{rel}?v={v}",
+        })
+
     def _read_json_body(self, max_len: int = 1024 * 1024):
         """JSON ボディを読む。失敗時は None。"""
         try:
@@ -1906,6 +2185,22 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 .month-head .sel-box { position: static; transform: none; margin-right: 8px; }
 .day-head { position: relative; }
 .month-head.on, .day-head.on { color: var(--accent); }
+/* ---------------- thumbnail context menu ---------------- */
+#ctx-menu {
+  position: fixed; z-index: 120; display: none; min-width: 160px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.55); padding: 4px; overflow: hidden;
+}
+#ctx-menu.on { display: block; }
+#ctx-menu button {
+  display: flex; width: 100%; align-items: center; gap: 8px;
+  background: none; border: 0; color: var(--fg);
+  font-size: 13px; text-align: left; padding: 9px 12px;
+  border-radius: 7px; cursor: pointer; white-space: nowrap;
+}
+#ctx-menu button:hover { background: #232833; }
+#ctx-menu button.disabled { opacity: .4; cursor: default; }
+#ctx-menu button.disabled:hover { background: none; }
 #dropzone {
   position: fixed; inset: 0; z-index: 90; display: none;
   background: rgba(20,120,255,.18); backdrop-filter: blur(2px);
@@ -2042,6 +2337,12 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="upm-overall"><div class="upm-track" id="upm-track"><div id="upm-fill"></div></div><div id="upm-summary"></div></div>
   <div id="upm-list"></div>
   <div class="upm-foot"><button id="upm-retry" style="display:none">失敗分を再試行</button><button id="upm-close">閉じる</button></div>
+</div>
+<div id="ctx-menu">
+  <button data-act="rot-l">左回転</button>
+  <button data-act="rot-r">右回転</button>
+  <button data-act="edit">編集</button>
+  <button data-act="dl">ダウンロード</button>
 </div>
 <div id="lightbox">
   <div id="lb-rail">
@@ -2718,6 +3019,11 @@ function makeCell(p) {
     if (state.selecting) { toggleSel(p); return; }
     openLb(p);
   });
+  c.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    showCtxMenu(e.clientX, e.clientY, p);
+  });
   const box = document.createElement('div');
   box.className = 'sel-box';
   box.textContent = '';
@@ -2900,6 +3206,89 @@ async function downloadUrl(url, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+// ---------------- thumbnail context menu ----------------
+// サムネイル一覧の右クリックメニュー（左回転・右回転・編集・ダウンロード）。
+// 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
+let ctxPhoto = null;
+const ctxMenu = document.getElementById('ctx-menu');
+function hideCtxMenu() {
+  if (ctxMenu) ctxMenu.classList.remove('on');
+  ctxPhoto = null;
+}
+function showCtxMenu(x, y, p) {
+  if (!ctxMenu) return;
+  ctxPhoto = p;
+  const isVideo = !!p.isVideo;
+  ctxMenu.querySelectorAll('button').forEach(b => {
+    const act = b.dataset.act;
+    const disabled = isVideo && act !== 'dl';
+    b.classList.toggle('disabled', disabled);
+  });
+  ctxMenu.classList.add('on');
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.min(x, window.innerWidth - r.width - 8) + 'px';
+  ctxMenu.style.top = Math.min(y, window.innerHeight - r.height - 8) + 'px';
+}
+if (ctxMenu) {
+  ctxMenu.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', async e => {
+      e.stopPropagation();
+      const p = ctxPhoto;
+      const act = b.dataset.act;
+      if (!p) { hideCtxMenu(); return; }
+      if (b.classList.contains('disabled')) {
+        alert('動画には対応していません');
+        hideCtxMenu();
+        return;
+      }
+      hideCtxMenu();
+      if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhoto(p, act === 'rot-l' ? 'left' : 'right');
+      else if (act === 'edit') openEditorForPhoto(p);
+      else if (act === 'dl') await downloadUrl(p.original, p.filename);
+    });
+  });
+}
+document.addEventListener('click', e => {
+  if (ctxMenu && ctxMenu.classList.contains('on') && !ctxMenu.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+window.addEventListener('scroll', () => hideCtxMenu(), { passive: true });
+async function rotateThumbPhoto(p, dir) {
+  if (p.isVideo) { alert('動画の回転には対応していません'); return; }
+  if (!confirm(`「${p.filename}」を${dir === 'left' ? '左' : '右'}に90度回転しますか？`)) return;
+  let j = null;
+  try {
+    const r = await fetch('/api/rotate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p.path, dir }),
+    });
+    j = await r.json();
+  } catch (err) {
+    alert('回転に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('回転に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  // 一覧の表示を最新化する（サムネイル・縦横比・キャッシュバスター）
+  if (j.width && j.height) { p.width = j.width; p.height = j.height; }
+  if (j.size) p.size = j.size;
+  if (j.thumb) p.thumb = j.thumb;
+  if (j.view) p.view = j.view;
+  if (j.original) p.original = j.original;
+  if (j.filename) p.filename = j.filename;
+  render();
+}
+function openEditorForPhoto(p) {
+  if (p.isVideo) { alert('動画の編集には対応していません'); return; }
+  const idx = state.photos.findIndex(x => x.path === p.path);
+  if (idx < 0) return;
+  lbIndex = idx;
+  showLb();
+  openEditor();
 }
 
 const nowViewing = document.getElementById('now-viewing');
