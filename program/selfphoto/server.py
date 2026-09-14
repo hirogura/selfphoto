@@ -875,9 +875,18 @@ class Handler(BaseHTTPRequestHandler):
         base = common.EDIT_PHOTO_DIR
         photos = []
         if base.is_dir():
-            for p in sorted(base.iterdir()):
-                if not p.is_file() or p.suffix.lower() not in common.PHOTO_EXTS:
-                    continue
+            # 「写真」と同じく新しいものが上になるよう更新日時の降順で返す
+            def _edit_mtime(p: Path) -> float:
+                try:
+                    return p.stat().st_mtime
+                except OSError:
+                    return 0.0
+            targets = sorted(
+                (p for p in base.iterdir()
+                 if p.is_file() and p.suffix.lower() in common.PHOTO_EXTS),
+                key=_edit_mtime, reverse=True,
+            )
+            for p in targets:
                 try:
                     st = p.stat()
                     local = datetime.fromtimestamp(st.st_mtime).astimezone()
