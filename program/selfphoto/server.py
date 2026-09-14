@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.4.1"
+    server_version = "selfphoto/1.4.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2067,6 +2067,8 @@ main { padding: 0 8px 80px 228px; }
   object-fit: contain;
 }
 #lightbox img.zoomed { max-width: none; max-height: none; cursor: grab; }
+#lightbox img.zoomed.dragging { cursor: grabbing; }
+#lightbox img { user-select: none; -webkit-user-select: none; }
 /* ---------------- viewer left rail ---------------- */
 #lb-rail {
   position: fixed; left: 0; top: 0; bottom: 0; z-index: 6;
@@ -3423,6 +3425,7 @@ function showLb() {
   } else {
     el = document.createElement('img');
     el.className = 'fit';
+    el.draggable = false;
     // まず軽量プレビュー（長辺1280px）を表示する。拡大操作でオリジナルに切替。
     // 編集・コピー・ダウンロードは従来どおり p.original を使う。
     el.dataset.preview = p.view || '';
@@ -3504,6 +3507,36 @@ document.getElementById('lb-zoom-label').onclick = (e) => {
   lbZoomIdx = LB_ZOOM_FIT; lbBaseW = 0;
   applyLbZoom();
 };
+// ---------------- viewer drag pan ----------------
+// 拡大表示中（zoomed）は画像のドラッグで表示位置を移動できる。
+// マウスのみ対象（タッチ・ペンはブラウザのネイティブスクロールに任せる）。
+// preventDefault しないためクリック・ダブルクリック（一覧に戻る）はそのまま動く。
+let lbPan = null;
+lbContent.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'mouse' || e.button !== 0) return;
+  const img = lbContent.querySelector('img.zoomed');
+  if (!img || e.target !== img) return;
+  lbPan = { x: e.clientX, y: e.clientY,
+            sl: lbContent.scrollLeft, st: lbContent.scrollTop, id: e.pointerId };
+});
+window.addEventListener('pointermove', e => {
+  if (!lbPan || e.pointerId !== lbPan.id) return;
+  const dx = e.clientX - lbPan.x, dy = e.clientY - lbPan.y;
+  if (Math.hypot(dx, dy) < 3) return;
+  const img = lbContent.querySelector('img.zoomed');
+  if (!img) return;
+  img.classList.add('dragging');
+  lbContent.scrollLeft = lbPan.sl - dx;
+  lbContent.scrollTop = lbPan.st - dy;
+}, { passive: true });
+const endLbPan = e => {
+  if (!lbPan || (e && e.pointerId !== lbPan.id)) return;
+  lbPan = null;
+  const img = lbContent.querySelector('img.dragging');
+  if (img) img.classList.remove('dragging');
+};
+window.addEventListener('pointerup', endLbPan);
+window.addEventListener('pointercancel', endLbPan);
 function moveLb(delta) {
   if (lbIndex < 0) return;
   lbIndex = (lbIndex + delta + state.photos.length) % state.photos.length;
