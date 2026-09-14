@@ -32,16 +32,21 @@ def capture_dates(path: Path, fallback_ts: float | None = None) -> tuple[datetim
     """(UTC の撮影日時, ローカルの撮影日時) を返す。
 
     Exif がなければ fallback_ts（なければ mtime）。
+    Exif は現地の壁時計なので、フォルダ分割用のローカル日時は
+    そのまま壁時計を使う（UTC 経由で astimezone すると JST で日付がずれる）。
     """
     dt_utc = exif.extract_capture_datetime(path)
     if dt_utc is None:
         ts = fallback_ts if fallback_ts is not None else path.stat().st_mtime
         dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return dt_utc, dt_utc.astimezone()
     if exif.HAS_PIL:
         local = exif._pil_capture(path)
         if local is not None:
             return dt_utc, local
-    return dt_utc, dt_utc.astimezone()
+    # Pillow 無しで純正パーサが当てた場合: dt_utc は壁時計に UTC ラベルを
+    # 付けたものなので、tz を外せば壁時計に戻る（日付ずれ防止）。
+    return dt_utc, dt_utc.replace(tzinfo=None)
 
 
 def register_file(path: Path, conn=None, file_hash: str | None = None,
@@ -334,13 +339,13 @@ def save_upload(name: str, fh, fallback_ts: float | None = None) -> tuple[Path, 
         raise
 
     try:
-        dt = exif.extract_capture_datetime(dest_tmp)
-        if dt is None:
-            ts = fallback_ts if fallback_ts is not None else dest_tmp.stat().st_mtime
-        else:
-            ts = None
-        d_loc = (dt.astimezone() if dt is not None
-                 else datetime.fromtimestamp(ts, tz=timezone.utc).astimezone())
+        # Exif の壁時計をそのままフォルダ分割に使う。
+        # extract の戻り値は壁時計に UTC ラベルを付けたものなので、
+        # そのまま astimezone() すると JST で +9 時間ずれて日付が翌日になる。
+        _, d_loc = capture_dates(dest_tmp, fallback_ts=fallback_ts)
+        ts = None if exif.extract_capture_datetime(dest_tmp) is not None else (
+            fallback_ts if fallback_ts is not None else dest_tmp.stat().st_mtime
+        )
         ymd = f"{d_loc.year:04d}{d_loc.month:02d}{d_loc.day:02d}"
         dest_dir = (common.PHOTO_DIR / f"{d_loc.year:04d}"
                     / f"{d_loc.year:04d}{d_loc.month:02d}" / f"{ymd}_")
