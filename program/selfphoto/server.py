@@ -2343,6 +2343,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <button data-act="rot-r">右回転</button>
   <button data-act="edit">編集</button>
   <button data-act="dl">ダウンロード</button>
+  <button data-act="del">削除</button>
 </div>
 <div id="lightbox">
   <div id="lb-rail">
@@ -3209,7 +3210,7 @@ async function downloadUrl(url, filename) {
 }
 
 // ---------------- thumbnail context menu ----------------
-// サムネイル一覧の右クリックメニュー（左回転・右回転・編集・ダウンロード）。
+// サムネイル一覧の右クリックメニュー（左回転・右回転・編集・ダウンロード・削除）。
 // 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
 let ctxPhoto = null;
 const ctxMenu = document.getElementById('ctx-menu');
@@ -3223,7 +3224,7 @@ function showCtxMenu(x, y, p) {
   const isVideo = !!p.isVideo;
   ctxMenu.querySelectorAll('button').forEach(b => {
     const act = b.dataset.act;
-    const disabled = isVideo && act !== 'dl';
+    const disabled = isVideo && (act !== 'dl' && act !== 'del');
     b.classList.toggle('disabled', disabled);
   });
   ctxMenu.classList.add('on');
@@ -3247,6 +3248,7 @@ if (ctxMenu) {
       if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhoto(p, act === 'rot-l' ? 'left' : 'right');
       else if (act === 'edit') openEditorForPhoto(p);
       else if (act === 'dl') await downloadUrl(p.original, p.filename);
+      else if (act === 'del') await deleteThumbPhoto(p);
     });
   });
 }
@@ -3280,6 +3282,33 @@ async function rotateThumbPhoto(p, dir) {
   if (j.original) p.original = j.original;
   if (j.filename) p.filename = j.filename;
   render();
+}
+async function deleteThumbPhoto(p) {
+  if (!confirm(`「${p.filename}」を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
+  let j = null;
+  try {
+    const r = await fetch('/api/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [p.path] }),
+    });
+    j = await r.json();
+  } catch (err) {
+    alert('削除に失敗しました（通信エラー）');
+    return;
+  }
+  if (!j || !j.ok || !((j.deleted || []).includes(p.path))) {
+    alert('削除に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    return;
+  }
+  state.photos = state.photos.filter(x => x.path !== p.path);
+  state.selected.delete(p.path);
+  const seg = p.path.split('/');
+  const folder = seg.length >= 3 ? seg.slice(0, 3).join('/') : '';
+  const monthPrefix = seg.length >= 2 ? seg.slice(0, 2).join('/') + '/' : '';
+  if (folder && !state.photos.some(x => x.path.startsWith(folder + '/'))) state.folderSel.delete(folder);
+  if (monthPrefix && !state.photos.some(x => x.path.startsWith(monthPrefix))) state.monthSel.delete(monthPrefix);
+  render();
+  loadMonths();
 }
 function openEditorForPhoto(p) {
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
