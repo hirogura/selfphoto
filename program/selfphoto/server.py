@@ -185,7 +185,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.5.0"
+    server_version = "selfphoto/1.5.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2387,71 +2387,70 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <button id="ed-rot-l">左回転</button>
       <button id="ed-rot-r">右回転</button>
       <button data-tool="rect">赤枠挿入</button>
-      <button data-tool="arrow">矢印挿入</button>
-      <button data-tool="pen">自由線</button>
-      <button data-tool="crop">トリミング</button>
-      <button data-tool="mosaic">モザイク</button>
-      <button data-tool="blur">ぼかし</button>
-      <button data-tool="shadow">シャドウ</button>
-      <button data-tool="highlight">ハイライト</button>
-      <button data-tool="contrast">コントラスト</button>
-      <button data-tool="saturation">彩度</button>
-      <button data-tool="colortemp">色温度</button>
-      <button data-tool="tint">色合い</button>
-      <button data-tool="resize">リサイズ</button>
-      <button id="ed-rename">リネーム</button>
       <div class="ed-panel" id="ed-panel-rect">
         <div class="ed-hint">ドラッグした範囲に角丸の赤枠</div>
         <label>太さ <input type="range" id="ed-rect-width" min="1" max="5" step="1" value="3"><span id="ed-rect-width-v">3</span></label>
       </div>
+      <button data-tool="arrow">矢印挿入</button>
       <div class="ed-panel" id="ed-panel-arrow">
         <div class="ed-hint">ドラッグした方向・長さで赤矢印</div>
         <label>太さ <input type="range" id="ed-arrow-width" min="1" max="5" step="1" value="3"><span id="ed-arrow-width-v">3</span></label>
       </div>
+      <button data-tool="pen">自由線</button>
       <div class="ed-panel" id="ed-panel-pen">
         <div class="ed-hint">ドラッグした軌跡に赤色の自由線</div>
         <label>太さ <input type="range" id="ed-pen-width" min="1" max="5" step="1" value="3"><span id="ed-pen-width-v">3</span></label>
       </div>
+      <button data-tool="crop">トリミング</button>
       <div class="ed-panel" id="ed-panel-crop">
         <label><input type="radio" name="ed-ratio" value="keep" checked> 比率維持</label>
         <label><input type="radio" name="ed-ratio" value="free"> 自由選択</label>
         <div class="ed-row"><button id="ed-crop-apply">適用</button><button id="ed-crop-clear">クリア</button></div>
         <div class="ed-hint">画像上でドラッグして範囲選択</div>
       </div>
+      <button data-tool="mosaic">モザイク</button>
       <div class="ed-panel" id="ed-panel-mosaic">
         <div class="ed-hint">塗った場所にモザイク</div>
         <label>強度 <input type="range" id="ed-mosaic-strength" min="1" max="5" step="1" value="3"><span id="ed-mosaic-strength-v">3</span></label>
         <label>太さ <input type="range" id="ed-mosaic-size" min="1" max="5" step="1" value="3"><span id="ed-mosaic-size-v">3</span></label>
       </div>
+      <button data-tool="blur">ぼかし</button>
       <div class="ed-panel" id="ed-panel-blur">
         <div class="ed-hint">塗った場所をぼかし</div>
         <label>強度 <input type="range" id="ed-blur-strength" min="1" max="5" step="1" value="3"><span id="ed-blur-strength-v">3</span></label>
         <label>太さ <input type="range" id="ed-blur-size" min="1" max="5" step="1" value="3"><span id="ed-blur-size-v">3</span></label>
       </div>
+      <button data-tool="shadow">シャドウ</button>
       <div class="ed-panel" id="ed-panel-shadow">
         <div class="ed-hint">暗い部分だけ調整（右で明るく）</div>
         <label>シャドウ <input type="range" id="ed-adj-shadow" data-adjust="shadow" min="-100" max="100" step="1" value="0"><span id="ed-adj-shadow-v">0</span></label>
       </div>
+      <button data-tool="highlight">ハイライト</button>
       <div class="ed-panel" id="ed-panel-highlight">
         <div class="ed-hint">明るい部分だけ調整（右で明るく）</div>
         <label>ハイライト <input type="range" id="ed-adj-highlight" data-adjust="highlight" min="-100" max="100" step="1" value="0"><span id="ed-adj-highlight-v">0</span></label>
       </div>
+      <button data-tool="contrast">コントラスト</button>
       <div class="ed-panel" id="ed-panel-contrast">
         <div class="ed-hint">明暗の差を調整（右で強調）</div>
         <label>コントラスト <input type="range" id="ed-adj-contrast" data-adjust="contrast" min="-100" max="100" step="1" value="0"><span id="ed-adj-contrast-v">0</span></label>
       </div>
+      <button data-tool="saturation">彩度</button>
       <div class="ed-panel" id="ed-panel-saturation">
         <div class="ed-hint">色の濃さを調整（右で濃く）</div>
         <label>彩度 <input type="range" id="ed-adj-saturation" data-adjust="saturation" min="-100" max="100" step="1" value="0"><span id="ed-adj-saturation-v">0</span></label>
       </div>
+      <button data-tool="colortemp">色温度</button>
       <div class="ed-panel" id="ed-panel-colortemp">
         <div class="ed-hint">色温度を調整（右で高く・暖かく）</div>
         <label>色温度 <input type="range" id="ed-adj-colortemp" data-adjust="colortemp" min="-100" max="100" step="1" value="0"><span id="ed-adj-colortemp-v">0</span></label>
       </div>
+      <button data-tool="tint">色合い</button>
       <div class="ed-panel" id="ed-panel-tint">
         <div class="ed-hint">グリーンとマゼンタのバランスを調整（右でマゼンタ寄り）</div>
         <label>色合い <input type="range" id="ed-adj-tint" data-adjust="tint" min="-100" max="100" step="1" value="0"><span id="ed-adj-tint-v">0</span></label>
       </div>
+      <button data-tool="resize">リサイズ</button>
       <div class="ed-panel" id="ed-panel-resize">
         <div class="ed-hint">いずれか1つを入力（縦横比は維持）</div>
         <label>長辺 <input type="number" id="ed-rs-long" min="1" max="8192" placeholder="px"></label>
@@ -2465,6 +2464,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <div class="ed-row"><button id="ed-rs-apply">適用</button></div>
         <div class="ed-hint" id="ed-rs-cur"></div>
       </div>
+      <button id="ed-rename">リネーム</button>
       <button id="ed-undo">1つ戻す</button>
     </div>
   </div>
