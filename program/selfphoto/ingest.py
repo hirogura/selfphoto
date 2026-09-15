@@ -271,11 +271,10 @@ def _head_equal(a: Path, b: Path, size: int = 65536) -> bool:
         return False
 
 
-def import_source(src_dir: str, dry_run: bool = False) -> None:
+def import_source(src_dir: str, dry_run: bool = False) -> dict:
     src = Path(src_dir).resolve()
     if not src.is_dir():
-        print(f"not a directory: {src}", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"not a directory: {src}")
     common.init_db()
     conn = common.get_db()
     files = [p for p in src.rglob("*")
@@ -306,6 +305,8 @@ def import_source(src_dir: str, dry_run: bool = False) -> None:
             conn.commit()
         copied += 1
     print(f"import: {copied} copied, {skipped} skipped (duplicate)")
+    return {"total": len(files), "copied": copied, "skipped": skipped,
+            "src": str(src), "dry_run": dry_run}
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +398,11 @@ def main(argv: list[str]) -> None:
         limit = int(argv[1]) if len(argv) >= 2 else None
         process_views(limit)
     elif len(argv) >= 2 and argv[0] == "import":
-        import_source(argv[1], dry_run=("--dry-run" in argv))
+        try:
+            import_source(argv[1], dry_run=("--dry-run" in argv))
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
     else:
         print(__doc__)
 

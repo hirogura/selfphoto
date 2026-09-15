@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +43,44 @@ ICON_FILES = {
 }
 
 SAFE_REL = re.compile(r"^[\w][\w\-./ ]*$")
+
+
+# ------------------------------------------------------------------
+# import: サーバ上のフォルダからの取り込み（ingest.import_source の Web UI）
+# ------------------------------------------------------------------
+_IMPORT_LOCK = threading.Lock()
+_IMPORT_STATE: dict = {"running": False, "last": None}
+
+
+def _run_import_job(src: str) -> None:
+    """バックグラウンドで import を実行し、結果を _IMPORT_STATE に記録する。"""
+    global _IMPORT_STATE
+    try:
+        from . import ingest
+        r = ingest.import_source(src)
+        with _IMPORT_LOCK:
+            _IMPORT_STATE["last"] = {
+                "ok": True, "src": src,
+                "total": r.get("total", 0),
+                "copied": r.get("copied", 0),
+                "skipped": r.get("skipped", 0),
+                "finishedAt": time.time(),
+            }
+        if r.get("copied"):
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
+    except Exception as e:  # noqa: BLE001
+        with _IMPORT_LOCK:
+            _IMPORT_STATE["last"] = {
+                "ok": False, "src": src, "error": str(e),
+                "finishedAt": time.time(),
+            }
+    finally:
+        with _IMPORT_LOCK:
+            _IMPORT_STATE["running"] = False
 
 
 def safe_join(base: Path, rel: str) -> Path | None:
@@ -185,7 +224,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.5.2"
+    server_version = "selfphoto/1.6.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -308,6 +347,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_backup_ssh_test()
             elif path == "/api/backup-target-check":
                 self.api_backup_target_check()
+            elif path == "/api/import":
+                self.api_import()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -414,6 +455,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_backup_config()
         elif path == "/api/backup-status":
             self.api_backup_status()
+        elif path == "/api/import-status":
+            self.api_import_status()
         elif path == "/api/months":
             self.api_months()
         elif path == "/api/search":
@@ -1804,6 +1847,41 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"ok": False, "error": r.get("error", "target check failed")}, 400)
 
+    def api_import(self) -> None:
+        """サーバ上のフォルダから取り込む（バックグラウンド実行）。
+
+        POST /api/import {"src": "/media/usb/DCIM"}
+        `python3 -m selfphoto.ingest import SRC` と同じ処理。
+        """
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        src = body.get("src") if isinstance(body.get("src"), str) else ""
+        src = (src or "").strip()
+        if not src:
+            self.send_json({"error": "src required"}, 400)
+            return
+        if not Path(src).is_dir():
+            self.send_json({"error": f"not a directory: {src}"}, 400)
+            return
+        with _IMPORT_LOCK:
+            if _IMPORT_STATE["running"]:
+                self.send_json({"error": "already running"}, 409)
+                return
+            _IMPORT_STATE["running"] = True
+            _IMPORT_STATE["last"] = None
+        t = threading.Thread(target=_run_import_job, args=(src,), daemon=True)
+        t.start()
+        self.send_json({"ok": True, "started": True, "src": src})
+
+    def api_import_status(self) -> None:
+        """取り込みの状態・前回結果を返す。"""
+        with _IMPORT_LOCK:
+            st = {"running": _IMPORT_STATE["running"],
+                  "lastRun": _IMPORT_STATE["last"]}
+        self.send_json(st)
+
     def _write_chunk(self, data: bytes) -> None:
         if data:
             self.wfile.write(f"{len(data):X}\r\n".encode() + data + b"\r\n")
@@ -2172,6 +2250,30 @@ main { padding: 0 8px 80px 228px; }
 #sidebar nav button.on { background: var(--accent); color: #fff; }
 #nav-download, #nav-delete { display: none; }
 #nav-delete .ico { color: #ff9a9a; }
+/* ---------------- sidebar import ---------------- */
+#import-box {
+  display: none; margin: 2px 6px; width: calc(100% - 12px);
+  flex-direction: column; gap: 6px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px;
+}
+#import-box.on { display: flex; }
+#import-box .imp-desc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+#import-src {
+  width: 100%;
+  background: var(--chip); border: 1px solid #33363c; border-radius: 8px;
+  padding: 7px 10px; color: var(--fg); font-size: 13px; outline: none;
+}
+#import-src:focus { border-color: var(--accent); }
+#import-run {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 8px 12px; font-size: 13px; cursor: pointer;
+}
+#import-run:hover { background: #33363c; }
+#import-run:disabled { opacity: .4; cursor: default; }
+#import-msg { font-size: 11px; color: var(--muted); line-height: 1.5; word-break: break-all; }
+#import-msg.ok { color: #7ee2a8; }
+#import-msg.ng { color: #ff9a9a; }
 /* ---------------- selection mode ---------------- */
 .cell { position: relative; }
 .cell .sel-box {
@@ -2298,6 +2400,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   #sidebar .logo span.txt, #sidebar nav button span.lbl, #sidebar nav .nav-count, #sidebar .foot { display: none; }
   #sidebar nav button { justify-content: center; padding: 12px 0; }
   #sidebar #search-box { margin: 2px 4px; width: calc(100% - 8px); padding: 7px 4px; font-size: 16px; }
+  #sidebar #import-box { margin: 2px 4px; width: calc(100% - 8px); padding: 6px; }
+  #sidebar #import-box .imp-desc, #sidebar #import-msg { display: none; }
+  #sidebar #import-src { padding: 7px 4px; font-size: 16px; }
+  #sidebar #import-run { padding: 8px 4px; font-size: 12px; }
   #lb-rail { width: 72px; padding: 10px 6px; }
   #lb-rail button { font-size: 12px; padding: 9px 2px; }
   #lb-titlebar { left: 72px; }
@@ -2321,6 +2427,13 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-backup"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">バックアップ</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
     <button id="nav-select"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg></span><span class="lbl">複数選択</span></button>
+    <button id="nav-import"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">インポート</span></button>
+    <div id="import-box">
+      <div class="imp-desc">サーバ上のフォルダから取り込みます</div>
+      <input id="import-src" type="text" placeholder="例: /media/usb/DCIM" autocomplete="off" spellcheck="false">
+      <button id="import-run" type="button">取込</button>
+      <div id="import-msg"></div>
+    </div>
     <button id="nav-download"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">ダウンロード</span></button>
     <button id="nav-delete"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg></span><span class="lbl">削除</span></button>
   </nav>
@@ -3097,6 +3210,77 @@ document.getElementById('nav-select').addEventListener('click', () => {
   state.selecting = !state.selecting;
   if (!state.selecting) { state.selected.clear(); state.folderSel.clear(); state.monthSel.clear(); }
   refreshSelectionUi();
+});
+
+// ---------------- sidebar import ----------------
+// サーバ上のフォルダを指定して取り込む（python3 -m selfphoto.ingest import SRC と同じ処理）。
+// 「インポート」ボタンで下の入力欄の表示を切り替え、「取込」で実行する。
+document.getElementById('nav-import').addEventListener('click', () => {
+  const box = document.getElementById('import-box');
+  const btn = document.getElementById('nav-import');
+  const on = box.classList.toggle('on');
+  btn.classList.toggle('on', on);
+  if (on) document.getElementById('import-src').focus();
+});
+let importPollTimer = null;
+function setImportMsg(ok, text) {
+  const el = document.getElementById('import-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = ok === true ? 'ok' : (ok === false ? 'ng' : '');
+  el.id = 'import-msg';
+}
+async function pollImportStatus() {
+  let st;
+  try {
+    st = await (await fetch('/api/import-status', { cache: 'no-store' })).json();
+  } catch (err) {
+    return;
+  }
+  const runBtn = document.getElementById('import-run');
+  if (st.running) {
+    setImportMsg(null, '取込中…');
+    if (runBtn) runBtn.disabled = true;
+    return;
+  }
+  if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
+  if (runBtn) runBtn.disabled = false;
+  const last = st.lastRun;
+  if (!last) { setImportMsg(null, ''); return; }
+  if (last.ok) {
+    setImportMsg(true, `完了: ${last.copied}件取込・${last.skipped}件スキップ（重複）`);
+    reload();
+    loadMonths();
+  } else {
+    setImportMsg(false, '失敗: ' + (last.error || 'unknown error'));
+  }
+}
+document.getElementById('import-run').addEventListener('click', async () => {
+  const srcEl = document.getElementById('import-src');
+  const src = (srcEl.value || '').trim();
+  if (!src) { setImportMsg(false, 'サーバ上のフォルダを指定してください'); return; }
+  const runBtn = document.getElementById('import-run');
+  runBtn.disabled = true;
+  setImportMsg(null, '取込中…');
+  let j = null;
+  try {
+    const r = await fetch('/api/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src }),
+    });
+    j = await r.json();
+  } catch (err) {
+    setImportMsg(false, '取込に失敗しました（通信エラー）');
+    runBtn.disabled = false;
+    return;
+  }
+  if (!j || !j.ok) {
+    setImportMsg(false, '取込に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    runBtn.disabled = false;
+    return;
+  }
+  if (importPollTimer) clearInterval(importPollTimer);
+  importPollTimer = setInterval(pollImportStatus, 2000);
 });
 
 // ---------------- restart (sidebar) ----------------

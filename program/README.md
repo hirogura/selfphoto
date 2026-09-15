@@ -109,6 +109,8 @@ tailscale serve --bg --https=3360,http://127.0.0.1:3360
 - `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる）
 - `GET /api/months` — 月ごとの件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
+- `POST /api/import` — サーバ上のフォルダから取り込む（JSON `{"src": "/media/usb/DCIM"}`。バックグラウンド実行）
+- `GET /api/import-status` — 取り込みの状態・前回結果
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
 - `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
