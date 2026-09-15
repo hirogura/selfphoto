@@ -258,7 +258,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.4"
+    server_version = "selfphoto/1.6.5"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2584,7 +2584,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <label><input type="radio" name="ed-ratio" value="keep" checked> 比率維持</label>
         <label><input type="radio" name="ed-ratio" value="free"> 自由選択</label>
         <div class="ed-row"><button id="ed-crop-apply">適用</button><button id="ed-crop-clear">クリア</button></div>
-        <div class="ed-hint">画像上でドラッグして範囲選択</div>
+        <div class="ed-hint">ドラッグで範囲選択・枠内ドラッグで移動（選び直しは枠外から）</div>
       </div>
       <button data-tool="mosaic">モザイク</button>
       <div class="ed-panel" id="ed-panel-mosaic">
@@ -3963,6 +3963,7 @@ const edCtx = edCanvas.getContext('2d', { willReadFrequently: true });
 const edWrap = document.getElementById('ed-wrap');
 const edCropBox = document.getElementById('ed-cropbox');
 const ed = { tool: null, path: '', filename: '', dirty: false, cropRect: null, cropDrag: null,
+  cropMove: null,
   painting: false, lastPt: null, shapeDrag: null, dragSnap: null,
   brushSizes: [12, 24, 48, 96, 192],
   mosaicBlocks: [4, 8, 16, 32, 64],
@@ -3975,7 +3976,7 @@ function openEditor() {
   if (!p) return;
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
   ed.path = p.path; ed.filename = p.filename;
-  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null;
+  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null; ed.cropMove = null;
   ed.shapeDrag = null; ed.dragSnap = null;
   ed.history = []; updateUndoButton();
   edAdjustReset();
@@ -3998,7 +3999,7 @@ function closeEditor(force) {
   if (!force && ed.dirty && !confirm('編集内容を破棄して閉じますか？')) return;
   document.getElementById('editor').classList.remove('open');
   syncBodyScroll();
-  ed.tool = null; ed.dirty = false; ed.cropRect = null;
+  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropMove = null;
   ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
@@ -4082,7 +4083,8 @@ function rotateEdCanvas(dir) {
   ctx.drawImage(edCanvas, -w / 2, -h / 2);
   edCanvas.width = h; edCanvas.height = w;
   edCtx.drawImage(c, 0, 0);
-  ed.cropRect = null; edCropBox.style.display = 'none';
+  ed.cropRect = null; ed.cropMove = null; edCropBox.style.display = 'none';
+  edCanvas.style.cursor = '';
   cancelShape(false);
   edAdjustReset();
   ed.dirty = true; updateResizeInfo();
@@ -4171,7 +4173,8 @@ document.getElementById('ed-undo').onclick = () => {
   img.onload = () => {
     edCanvas.width = img.naturalWidth; edCanvas.height = img.naturalHeight;
     edCtx.drawImage(img, 0, 0);
-    ed.cropRect = null; edCropBox.style.display = 'none';
+    ed.cropRect = null; ed.cropMove = null; edCropBox.style.display = 'none';
+    edCanvas.style.cursor = '';
     cancelShape(false);
     ed.dirty = true; updateResizeInfo();
   };
@@ -4232,7 +4235,8 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
       .forEach(x => x.classList.toggle('on', x.dataset.tool === ed.tool));
     document.querySelectorAll('#editor .ed-panel')
       .forEach(x => x.classList.toggle('on', x.id === 'ed-panel-' + ed.tool));
-    edCropBox.style.display = 'none'; ed.cropRect = null;
+    edCropBox.style.display = 'none'; ed.cropRect = null; ed.cropMove = null;
+    edCanvas.style.cursor = '';
     cancelShape(true);
     // 調整ツール以外に移ったら調整の基準スナップショットを捨てる
     // （古い基準に古いスライダー値を重ね掛けしないため）
@@ -4410,6 +4414,19 @@ function drawCropBox() {
   ed.cropRect = r;
   placeCropBox(r);
 }
+// 選択済み枠の内側か（移動つまみ判定）。画像ピクセル座標で比べる。
+function cropHitTest(pt) {
+  const r = ed.cropRect;
+  if (!r || r.w < 2 || r.h < 2) return false;
+  return pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h;
+}
+// トリミング選択中は枠内ホバーでつまむカーソルにする
+function updateCropCursor(pt) {
+  if (ed.tool !== 'crop') return;
+  if (ed.cropMove) { edCanvas.style.cursor = 'grabbing'; return; }
+  if (ed.cropDrag) { edCanvas.style.cursor = 'crosshair'; return; }
+  edCanvas.style.cursor = (pt && cropHitTest(pt)) ? 'grab' : '';
+}
 document.getElementById('ed-crop-apply').onclick = () => {
   const r = ed.cropRect;
   if (!r || r.w < 2 || r.h < 2) { alert('範囲を選択してください'); return; }
@@ -4419,12 +4436,14 @@ document.getElementById('ed-crop-apply').onclick = () => {
   c.getContext('2d').drawImage(edCanvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
   edCanvas.width = r.w; edCanvas.height = r.h;
   edCtx.drawImage(c, 0, 0);
-  ed.cropRect = null; edCropBox.style.display = 'none';
+  ed.cropRect = null; ed.cropMove = null; edCropBox.style.display = 'none';
+  edCanvas.style.cursor = '';
   edAdjustReset();
   ed.dirty = true; updateResizeInfo();
 };
 document.getElementById('ed-crop-clear').onclick = () => {
-  ed.cropDrag = null; ed.cropRect = null; edCropBox.style.display = 'none';
+  ed.cropDrag = null; ed.cropRect = null; ed.cropMove = null;
+  edCropBox.style.display = 'none'; edCanvas.style.cursor = '';
 };
 
 // ---------------- mosaic / blur brush ----------------
@@ -4539,8 +4558,17 @@ edCanvas.addEventListener('pointerdown', e => {
   try { edCanvas.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
   const pt = edPos(e);
   if (ed.tool === 'crop') {
+    // 選択済み枠の内側をつまんだら移動モード（微調整用）。枠外は新規選択。
+    if (!ed.cropDrag && ed.cropRect && cropHitTest(pt)) {
+      ed.cropMove = { sx: pt.x, sy: pt.y,
+        ox: ed.cropRect.x, oy: ed.cropRect.y, w: ed.cropRect.w, h: ed.cropRect.h };
+      edCanvas.style.cursor = 'grabbing';
+      return;
+    }
+    ed.cropMove = null;
     ed.cropDrag = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
     drawCropBox();
+    updateCropCursor(pt);
   } else if (ed.tool === 'mosaic' || ed.tool === 'blur') {
     edPushHistory();
     ed.painting = true; ed.lastPt = pt;
@@ -4650,9 +4678,18 @@ function previewShape() {
 edCanvas.addEventListener('pointermove', e => {
   if (!ed.tool) return;
   const pt = edPos(e);
-  if (ed.tool === 'crop' && ed.cropDrag) {
+  if (ed.tool === 'crop' && ed.cropMove) {
+    const m = ed.cropMove;
+    const nx = Math.max(0, Math.min(edCanvas.width - m.w, Math.round(m.ox + (pt.x - m.sx))));
+    const ny = Math.max(0, Math.min(edCanvas.height - m.h, Math.round(m.oy + (pt.y - m.sy))));
+    ed.cropRect = { x: nx, y: ny, w: m.w, h: m.h };
+    placeCropBox(ed.cropRect);
+    edCanvas.style.cursor = 'grabbing';
+  } else if (ed.tool === 'crop' && ed.cropDrag) {
     ed.cropDrag.x1 = pt.x; ed.cropDrag.y1 = pt.y;
     drawCropBox();
+  } else if (ed.tool === 'crop') {
+    updateCropCursor(pt);
   } else if (ed.painting && ed.lastPt && (ed.tool === 'mosaic' || ed.tool === 'blur')) {
     paintStroke(ed.lastPt.x, ed.lastPt.y, pt.x, pt.y);
     ed.lastPt = pt;
@@ -4669,18 +4706,22 @@ edCanvas.addEventListener('pointermove', e => {
     }
   }
 });
-edCanvas.addEventListener('pointerup', () => {
+edCanvas.addEventListener('pointerup', (e) => {
   if (ed.shapeDrag && ed.dragSnap) {
     edCtx.drawImage(ed.dragSnap, 0, 0);
     if (drawShape(edCtx, ed.shapeDrag)) ed.dirty = true;
     else { ed.history.pop(); updateUndoButton(); }
     ed.shapeDrag = null; ed.dragSnap = null;
   }
+  if (ed.cropMove) {
+    ed.cropMove = null;
+    try { updateCropCursor(edPos(e)); } catch (err) { edCanvas.style.cursor = ''; }
+  }
   ed.cropDrag = null; ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
 });
 edCanvas.addEventListener('pointercancel', () => {
   cancelShape(true);
-  ed.cropDrag = null; ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
+  ed.cropDrag = null; ed.cropMove = null; ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
 });
 
 // ---------------- resize ----------------
