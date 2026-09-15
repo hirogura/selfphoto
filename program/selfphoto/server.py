@@ -258,7 +258,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.6"
+    server_version = "selfphoto/1.6.7"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2572,6 +2572,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <div class="ed-main">
     <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><div id="ed-cropbox"><span class="cb-h nw"></span><span class="cb-h ne"></span><span class="cb-h sw"></span><span class="cb-h se"></span><span class="cb-h n"></span><span class="cb-h s"></span><span class="cb-h w"></span><span class="cb-h e"></span></div></div>
     <div class="ed-side">
+      <button data-tool="hand">手のひら</button>
+      <div class="ed-panel" id="ed-panel-hand">
+        <div class="ed-hint">ドラッグで表示位置を移動（拡大時の見たい場所へ）</div>
+      </div>
       <button id="ed-zoom-in">拡大</button>
       <button id="ed-zoom-label" title="クリックで画面に合わせる">100%</button>
       <button id="ed-zoom-out">縮小</button>
@@ -3976,7 +3980,7 @@ const edCtx = edCanvas.getContext('2d', { willReadFrequently: true });
 const edWrap = document.getElementById('ed-wrap');
 const edCropBox = document.getElementById('ed-cropbox');
 const ed = { tool: null, path: '', filename: '', dirty: false, cropRect: null, cropDrag: null,
-  cropMove: null, cropResize: null,
+  cropMove: null, cropResize: null, pan: null,
   painting: false, lastPt: null, shapeDrag: null, dragSnap: null,
   brushSizes: [12, 24, 48, 96, 192],
   mosaicBlocks: [4, 8, 16, 32, 64],
@@ -3989,7 +3993,7 @@ function openEditor() {
   if (!p) return;
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
   ed.path = p.path; ed.filename = p.filename;
-  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null; ed.cropMove = null; ed.cropResize = null;
+  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropDrag = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null;
   ed.shapeDrag = null; ed.dragSnap = null;
   ed.history = []; updateUndoButton();
   edAdjustReset();
@@ -4012,7 +4016,7 @@ function closeEditor(force) {
   if (!force && ed.dirty && !confirm('編集内容を破棄して閉じますか？')) return;
   document.getElementById('editor').classList.remove('open');
   syncBodyScroll();
-  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropMove = null; ed.cropResize = null;
+  ed.tool = null; ed.dirty = false; ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null;
   ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
@@ -4096,7 +4100,7 @@ function rotateEdCanvas(dir) {
   ctx.drawImage(edCanvas, -w / 2, -h / 2);
   edCanvas.width = h; edCanvas.height = w;
   edCtx.drawImage(c, 0, 0);
-  ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; edCropBox.style.display = 'none';
+  ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null; edCropBox.style.display = 'none';
   edCanvas.style.cursor = '';
   cancelShape(false);
   edAdjustReset();
@@ -4186,7 +4190,7 @@ document.getElementById('ed-undo').onclick = () => {
   img.onload = () => {
     edCanvas.width = img.naturalWidth; edCanvas.height = img.naturalHeight;
     edCtx.drawImage(img, 0, 0);
-    ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; edCropBox.style.display = 'none';
+    ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null; edCropBox.style.display = 'none';
     edCanvas.style.cursor = '';
     cancelShape(false);
     ed.dirty = true; updateResizeInfo();
@@ -4248,7 +4252,7 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
       .forEach(x => x.classList.toggle('on', x.dataset.tool === ed.tool));
     document.querySelectorAll('#editor .ed-panel')
       .forEach(x => x.classList.toggle('on', x.id === 'ed-panel-' + ed.tool));
-    edCropBox.style.display = 'none'; ed.cropRect = null; ed.cropMove = null; ed.cropResize = null;
+    edCropBox.style.display = 'none'; ed.cropRect = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null;
     edCanvas.style.cursor = '';
     cancelShape(true);
     // 調整ツール以外に移ったら調整の基準スナップショットを捨てる
@@ -4369,6 +4373,11 @@ function brushDiameter() {
   return ed.brushSizes[idx];
 }
 function updateBrushCursor() {
+  // 手のひら選択中はつまむカーソル（ドラッグ中は握る形）
+  if (ed.tool === 'hand') {
+    edCanvas.style.cursor = ed.pan ? 'grabbing' : 'grab';
+    return;
+  }
   if ((ed.tool !== 'mosaic' && ed.tool !== 'blur') || !edCanvas.width) {
     edCanvas.style.cursor = '';
     return;
@@ -4687,6 +4696,13 @@ edCanvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   try { edCanvas.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
   const pt = edPos(e);
+  if (ed.tool === 'hand') {
+    // 手のひら: スクロール位置をつまんで表示場所を移動する（拡大時の見たい場所へ）
+    ed.pan = { x: e.clientX, y: e.clientY,
+      l: edWrap.scrollLeft, t: edWrap.scrollTop };
+    edCanvas.style.cursor = 'grabbing';
+    return;
+  }
   if (ed.tool === 'crop') {
     // 選択済み枠の辺・角をつまんだらサイズ変更、内側なら移動、枠外は新規選択。
     if (!ed.cropDrag && !ed.cropMove && !ed.cropResize && ed.cropRect) {
@@ -4817,7 +4833,10 @@ function previewShape() {
 edCanvas.addEventListener('pointermove', e => {
   if (!ed.tool) return;
   const pt = edPos(e);
-  if (ed.tool === 'crop' && ed.cropResize) {
+  if (ed.tool === 'hand' && ed.pan) {
+    edWrap.scrollLeft = ed.pan.l - (e.clientX - ed.pan.x);
+    edWrap.scrollTop = ed.pan.t - (e.clientY - ed.pan.y);
+  } else if (ed.tool === 'crop' && ed.cropResize) {
     const rs = ed.cropResize;
     ed.cropRect = cropResizeTo(rs.handle,
       { x: rs.ox, y: rs.oy, w: rs.w, h: rs.h }, pt.x - rs.sx, pt.y - rs.sy);
@@ -4858,6 +4877,10 @@ edCanvas.addEventListener('pointerup', (e) => {
     else { ed.history.pop(); updateUndoButton(); }
     ed.shapeDrag = null; ed.dragSnap = null;
   }
+  if (ed.pan) {
+    ed.pan = null;
+    if (ed.tool === 'hand') edCanvas.style.cursor = 'grab';
+  }
   if (ed.cropResize) {
     ed.cropResize = null;
     try { updateCropCursor(edPos(e)); } catch (err) { edCanvas.style.cursor = ''; }
@@ -4869,7 +4892,8 @@ edCanvas.addEventListener('pointerup', (e) => {
 });
 edCanvas.addEventListener('pointercancel', () => {
   cancelShape(true);
-  ed.cropDrag = null; ed.cropMove = null; ed.cropResize = null;
+  ed.cropDrag = null; ed.cropMove = null; ed.cropResize = null; ed.pan = null;
+  if (ed.tool === 'hand') edCanvas.style.cursor = 'grab';
   ed.painting = false; ed.lastPt = null; ed.mosaicDone = null;
 });
 
