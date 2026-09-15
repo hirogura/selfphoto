@@ -50,17 +50,29 @@ SAFE_REL = re.compile(r"^[\w][\w\-./ ]*$")
 # scan: 既存の selfphoto-data からの取り込み（ingest.scan_data_dir の Web UI）
 # ------------------------------------------------------------------
 _IMPORT_LOCK = threading.Lock()
-_IMPORT_STATE: dict = {"running": False, "last": None}
+_IMPORT_STATE: dict = {"running": False, "last": None, "progress": None}
 _SCAN_LOCK = threading.Lock()
-_SCAN_STATE: dict = {"running": False, "last": None}
+_SCAN_STATE: dict = {"running": False, "last": None, "progress": None}
 
 
 def _run_import_job(src: str) -> None:
-    """バックグラウンドで import を実行し、結果を _IMPORT_STATE に記録する。"""
+    """バックグラウンドで import を実行し、結果を _IMPORT_STATE に記録する。
+
+    処理中の進捗（何枚目/全何枚・現在のファイル名）も _IMPORT_STATE["progress"]
+    に随時記録する（/api/import-status で返す。ハング検知用）。
+    """
     global _IMPORT_STATE
+
+    def _cb(done: int, total: int, name: str) -> None:
+        with _IMPORT_LOCK:
+            _IMPORT_STATE["progress"] = {
+                "done": done, "total": total, "current": name,
+                "updatedAt": time.time(),
+            }
+
     try:
         from . import ingest
-        r = ingest.import_source(src)
+        r = ingest.import_source(src, progress=_cb)
         with _IMPORT_LOCK:
             _IMPORT_STATE["last"] = {
                 "ok": True, "src": src,
@@ -87,11 +99,23 @@ def _run_import_job(src: str) -> None:
 
 
 def _run_scan_job() -> None:
-    """バックグラウンドで scan を実行し、結果を _SCAN_STATE に記録する。"""
+    """バックグラウンドで scan を実行し、結果を _SCAN_STATE に記録する。
+
+    処理中の進捗も _SCAN_STATE["progress"] に随時記録する
+    （/api/scan-status で返す。ハング検知用）。
+    """
     global _SCAN_STATE
+
+    def _cb(done: int, total: int, name: str) -> None:
+        with _SCAN_LOCK:
+            _SCAN_STATE["progress"] = {
+                "done": done, "total": total, "current": name,
+                "updatedAt": time.time(),
+            }
+
     try:
         from . import ingest
-        r = ingest.scan_data_dir()
+        r = ingest.scan_data_dir(progress=_cb)
         with _SCAN_LOCK:
             _SCAN_STATE["last"] = {
                 "ok": True,
@@ -258,7 +282,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.7"
+    server_version = "selfphoto/1.6.8"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1909,15 +1933,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _IMPORT_STATE["running"] = True
             _IMPORT_STATE["last"] = None
+            _IMPORT_STATE["progress"] = None
         t = threading.Thread(target=_run_import_job, args=(src,), daemon=True)
         t.start()
         self.send_json({"ok": True, "started": True, "src": src})
 
     def api_import_status(self) -> None:
-        """取り込みの状態・前回結果を返す。"""
+        """取り込みの状態・前回結果を返す（実行中は進捗 {done,total,current} 付き）。"""
         with _IMPORT_LOCK:
             st = {"running": _IMPORT_STATE["running"],
-                  "lastRun": _IMPORT_STATE["last"]}
+                  "lastRun": _IMPORT_STATE["last"],
+                  "progress": _IMPORT_STATE["progress"]}
         self.send_json(st)
 
     def api_scan(self) -> None:
@@ -1932,15 +1958,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _SCAN_STATE["running"] = True
             _SCAN_STATE["last"] = None
+            _SCAN_STATE["progress"] = None
         t = threading.Thread(target=_run_scan_job, daemon=True)
         t.start()
         self.send_json({"ok": True, "started": True})
 
     def api_scan_status(self) -> None:
-        """scan の状態・前回結果を返す。"""
+        """scan の状態・前回結果を返す（実行中は進捗 {done,total,current} 付き）。"""
         with _SCAN_LOCK:
             st = {"running": _SCAN_STATE["running"],
-                  "lastRun": _SCAN_STATE["last"]}
+                  "lastRun": _SCAN_STATE["last"],
+                  "progress": _SCAN_STATE["progress"]}
         self.send_json(st)
 
     def _write_chunk(self, data: bytes) -> None:
@@ -2349,6 +2377,7 @@ main { padding: 0 8px 80px 228px; }
 #import-msg { font-size: 11px; color: var(--muted); line-height: 1.5; word-break: break-all; }
 #import-msg.ok { color: #7ee2a8; }
 #import-msg.ng { color: #ff9a9a; }
+#import-prog { width: 100%; height: 14px; accent-color: var(--accent); }
 /* ---------------- selection mode ---------------- */
 .cell { position: relative; }
 .cell .sel-box {
@@ -2509,6 +2538,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <input id="import-src" type="text" placeholder="例: /media/usb/DCIM" autocomplete="off" spellcheck="false">
       <button id="import-run" type="button">取込</button>
       <div id="import-msg"></div>
+      <progress id="import-prog" max="100" value="0" style="display:none"></progress>
     </div>
     <button id="nav-select"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg></span><span class="lbl">複数選択</span></button>
     <button id="nav-download"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">ダウンロード</span></button>
@@ -3313,6 +3343,31 @@ function setImportMsg(ok, text) {
   el.className = ok === true ? 'ok' : (ok === false ? 'ng' : '');
   el.id = 'import-msg';
 }
+// 取込中の進捗バー表示（total 不明時は不定表示でハングでないことを示す）
+function showImportProg(done, total) {
+  const bar = document.getElementById('import-prog');
+  if (!bar) return;
+  bar.style.display = 'block';
+  if (typeof done === 'number' && typeof total === 'number' && total > 0) {
+    bar.max = total; bar.value = Math.min(done, total);
+  } else {
+    bar.removeAttribute('value');
+  }
+}
+function hideImportProg() {
+  const bar = document.getElementById('import-prog');
+  if (!bar) return;
+  bar.style.display = 'none';
+  bar.max = 100; bar.value = 0;
+}
+// 実行中の進捗文言（◯枚目/全△枚＋現在のファイル名。total 不明時は不定文言）
+function importRunningText(pg, prefix) {
+  if (pg && typeof pg.total === 'number' && pg.total > 0) {
+    const cur = pg.current ? `（${pg.current}）` : '';
+    return `${prefix}… ${pg.done}/${pg.total}枚${cur}`;
+  }
+  return prefix + '…';
+}
 async function pollImportStatus() {
   let st;
   try {
@@ -3323,11 +3378,15 @@ async function pollImportStatus() {
   const runBtn = document.getElementById('import-run');
   const scanBtn = document.getElementById('scan-run');
   if (st.running) {
-    setImportMsg(null, '取込中…');
+    setImportMsg(null, importRunningText(st.progress, '取込中'));
+    const pg = st.progress;
+    if (pg && pg.total > 0) showImportProg(pg.done, pg.total);
+    else showImportProg();
     if (runBtn) runBtn.disabled = true;
     if (scanBtn) scanBtn.disabled = true;
     return;
   }
+  hideImportProg();
   if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
   if (runBtn) runBtn.disabled = false;
   if (scanBtn) scanBtn.disabled = false;
@@ -3350,6 +3409,7 @@ document.getElementById('import-run').addEventListener('click', async () => {
   runBtn.disabled = true;
   if (scanBtn0) scanBtn0.disabled = true;
   setImportMsg(null, '取込中…');
+  showImportProg();
   let j = null;
   try {
     const r = await fetch('/api/import', {
@@ -3359,12 +3419,14 @@ document.getElementById('import-run').addEventListener('click', async () => {
     j = await r.json();
   } catch (err) {
     setImportMsg(false, '取込に失敗しました（通信エラー）');
+    hideImportProg();
     runBtn.disabled = false;
     if (scanBtn0) scanBtn0.disabled = false;
     return;
   }
   if (!j || !j.ok) {
     setImportMsg(false, '取込に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    hideImportProg();
     runBtn.disabled = false;
     if (scanBtn0) scanBtn0.disabled = false;
     return;
@@ -3383,11 +3445,15 @@ async function pollScanStatus() {
   const runBtn = document.getElementById('import-run');
   const scanBtn = document.getElementById('scan-run');
   if (st.running) {
-    setImportMsg(null, '取込中…');
+    setImportMsg(null, importRunningText(st.progress, 'スキャン中'));
+    const pg = st.progress;
+    if (pg && pg.total > 0) showImportProg(pg.done, pg.total);
+    else showImportProg();
     if (runBtn) runBtn.disabled = true;
     if (scanBtn) scanBtn.disabled = true;
     return;
   }
+  hideImportProg();
   if (scanPollTimer) { clearInterval(scanPollTimer); scanPollTimer = null; }
   if (runBtn) runBtn.disabled = false;
   if (scanBtn) scanBtn.disabled = false;
@@ -3406,19 +3472,22 @@ document.getElementById('scan-run').addEventListener('click', async () => {
   const runBtn = document.getElementById('import-run');
   scanBtn.disabled = true;
   if (runBtn) runBtn.disabled = true;
-  setImportMsg(null, '取込中…');
+  setImportMsg(null, 'スキャン中…');
+  showImportProg();
   let j = null;
   try {
     const r = await fetch('/api/scan', { method: 'POST' });
     j = await r.json();
   } catch (err) {
     setImportMsg(false, '取込に失敗しました（通信エラー）');
+    hideImportProg();
     scanBtn.disabled = false;
     if (runBtn) runBtn.disabled = false;
     return;
   }
   if (!j || !j.ok) {
     setImportMsg(false, '取込に失敗しました: ' + ((j && j.error) || 'unknown error'));
+    hideImportProg();
     scanBtn.disabled = false;
     if (runBtn) runBtn.disabled = false;
     return;

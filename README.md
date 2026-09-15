@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.1.6.7 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.1.6.8 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト

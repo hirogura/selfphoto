@@ -86,8 +86,12 @@ def register_file(path: Path, conn=None, file_hash: str | None = None,
     return True
 
 
-def scan_data_dir(max_workers: int = 8) -> dict:
-    """PHOTO_DIR (photo/) 以下を走査して DB に登録する。"""
+def scan_data_dir(max_workers: int = 8, progress=None) -> dict:
+    """PHOTO_DIR (photo/) 以下を走査して DB に登録する。
+
+    progress が与えられれば progress(done, total, name) を呼ぶ
+    （Web UI の進捗表示用。別スレッドから呼ばれることがある）。
+    """
     common.init_db()
     conn = common.get_db()
     known = {r["path"] for r in conn.execute("SELECT path FROM photos")}
@@ -96,6 +100,12 @@ def scan_data_dir(max_workers: int = 8) -> dict:
         p for p in common.PHOTO_DIR.rglob("*")
         if p.is_file() and p.suffix.lower() in common.SUPPORTED_EXTS
     ]
+    total = len(files)
+    if progress is not None:
+        try:
+            progress(0, total, "")
+        except Exception:
+            pass
 
     def hash_one(p: Path):
         try:
@@ -106,9 +116,14 @@ def scan_data_dir(max_workers: int = 8) -> dict:
     added = 0
     # 重いハッシュ計算だけ並列化し、DB 登録はメインスレッドで行う
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for p, h in pool.map(hash_one, files):
+        for i, (p, h) in enumerate(pool.map(hash_one, files), 1):
             if h is not None and register_file(p, conn, file_hash=h):
                 added += 1
+            if progress is not None:
+                try:
+                    progress(i, total, p.name)
+                except Exception:
+                    pass
     # 消えたファイルを DB からも削除
     on_disk = {p.relative_to(common.PHOTO_DIR).as_posix() for p in files}
     gone = known - on_disk
@@ -272,7 +287,12 @@ def _head_equal(a: Path, b: Path, size: int = 65536) -> bool:
         return False
 
 
-def import_source(src_dir: str, dry_run: bool = False) -> dict:
+def import_source(src_dir: str, dry_run: bool = False, progress=None) -> dict:
+    """SD カード等から日付フォルダへコピーして登録する。
+
+    progress が与えられれば progress(done, total, name) を呼ぶ
+    （Web UI の進捗表示用。別スレッドから呼ばれることがある）。
+    """
     src = Path(src_dir).resolve()
     if not src.is_dir():
         raise ValueError(f"not a directory: {src}")
@@ -280,9 +300,15 @@ def import_source(src_dir: str, dry_run: bool = False) -> dict:
     conn = common.get_db()
     files = [p for p in src.rglob("*")
              if p.is_file() and p.suffix.lower() in common.SUPPORTED_EXTS]
-    print(f"import: {len(files)} files found under {src}")
+    total = len(files)
+    print(f"import: {total} files found under {src}")
+    if progress is not None:
+        try:
+            progress(0, total, "")
+        except Exception:
+            pass
     copied = skipped = 0
-    for p in files:
+    for i, p in enumerate(files, 1):
         st = p.stat()
         dt_utc, dt_local = capture_dates(p)
         ymd = f"{dt_local.year:04d}{dt_local.month:02d}{dt_local.day:02d}"
@@ -299,12 +325,22 @@ def import_source(src_dir: str, dry_run: bool = False) -> dict:
             n += 1
         if dest.exists():
             skipped += 1
+            if progress is not None:
+                try:
+                    progress(i, total, p.name)
+                except Exception:
+                    pass
             continue
         if not dry_run:
             shutil.copy2(p, dest)
             register_file(dest, conn)
             conn.commit()
         copied += 1
+        if progress is not None:
+            try:
+                progress(i, total, p.name)
+            except Exception:
+                pass
     print(f"import: {copied} copied, {skipped} skipped (duplicate)")
     return {"total": len(files), "copied": copied, "skipped": skipped,
             "src": str(src), "dry_run": dry_run}
