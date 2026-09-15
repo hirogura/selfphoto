@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 
 # ディレクトリ設定
 # 写真・サムネイル・DB はプログラム領域 (/opt/selfphoto) と完全に分離し、

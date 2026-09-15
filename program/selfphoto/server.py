@@ -258,7 +258,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.3"
+    server_version = "selfphoto/1.6.4"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4395,8 +4395,12 @@ function placeCropBox(r) {
   const cr = edCanvas.getBoundingClientRect(), wr = edWrap.getBoundingClientRect();
   const sx = cr.width / edCanvas.width, sy = cr.height / edCanvas.height;
   edCropBox.style.display = 'block';
-  edCropBox.style.left = (cr.left - wr.left + r.x * sx) + 'px';
-  edCropBox.style.top = (cr.top - wr.top + r.y * sy) + 'px';
+  // ed-cropbox はスクロールする ed-wrap 内の absolute 配置のため、
+  // 画面上の差分にスクロール量を足して内容座標に戻す。
+  // 足さないと拡大＋スクロール時に枠がスクロール分だけずれる。
+  // 赤枠等は canvas の rect のみで換算するため影響を受けない。
+  edCropBox.style.left = (cr.left - wr.left + edWrap.scrollLeft + r.x * sx) + 'px';
+  edCropBox.style.top = (cr.top - wr.top + edWrap.scrollTop + r.y * sy) + 'px';
   edCropBox.style.width = (r.w * sx) + 'px';
   edCropBox.style.height = (r.h * sy) + 'px';
 }
