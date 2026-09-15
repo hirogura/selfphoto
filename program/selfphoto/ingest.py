@@ -86,7 +86,7 @@ def register_file(path: Path, conn=None, file_hash: str | None = None,
     return True
 
 
-def scan_data_dir(max_workers: int = 8) -> None:
+def scan_data_dir(max_workers: int = 8) -> dict:
     """PHOTO_DIR (photo/) 以下を走査して DB に登録する。"""
     common.init_db()
     conn = common.get_db()
@@ -116,6 +116,7 @@ def scan_data_dir(max_workers: int = 8) -> None:
         conn.execute("DELETE FROM photos WHERE path=?", (rel,))
     conn.commit()
     print(f"scan: {len(files)} files, {added} new, {len(gone)} removed")
+    return {"total": len(files), "added": added, "removed": len(gone)}
 
 
 def thumb_rel_path(rel: str, base: str) -> str:

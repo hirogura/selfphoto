@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.1.6.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.1.6.1 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -168,9 +168,12 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
   明示チェックした場合はフォルダ単位で zip 圧縮、ファイル個別チェックの
   場合は全ファイル選択でも 1 枚ずつダウンロード
 - **削除** : 選択した写真を削除（一覧・ファイル実体・サムネイル。確認あり）
-- **インポート** : 押すと下にサーバ上のフォルダ指定欄が表示される。
-  フォルダを指定して **取込** を押すと `python3 -m selfphoto.ingest import` と
-  同じ取り込みを実行する（バックグラウンド実行、結果は欄内に表示）
+- **インポート** : 押すと下に取り込み欄が表示される。
+  上段の **取込** は既存の selfphoto-data からの取り込み
+  （`python3 -m selfphoto.ingest scan` と同じ。インストールし直した時などに使う）。
+  下段はサーバ上のフォルダを指定して **取込** を押すと
+  `python3 -m selfphoto.ingest import` と同じ取り込みを実行する
+  （いずれもバックグラウンド実行、結果は欄内に表示）
 
 サムネイル一覧の右クリックメニュー（動画はダウンロード・削除のみ）:
 
@@ -272,6 +275,8 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - `POST /api/backup-watch` — 監視の開始・停止（JSON `{"enabled": true}`）
 - `POST /api/import` — サーバ上のフォルダから取り込む（JSON `{"src": "/media/usb/DCIM"}`。バックグラウンド実行）
 - `GET /api/import-status` — 取り込みの状態・前回結果
+- `POST /api/scan` — 既存の selfphoto-data から取り込む（バックグラウンド実行）
+- `GET /api/scan-status` — scan の状態・前回結果
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
 - `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
