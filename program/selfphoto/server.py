@@ -282,7 +282,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.7.1"
+    server_version = "selfphoto/1.7.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2982,14 +2982,17 @@ function backupFormValues() {
     },
   };
 }
-async function saveBackupConfig() {
+async function postBackupConfig() {
   const body = backupFormValues();
   // パスワード空欄は「変更なし」の意味。**** は送らない。
   const r = await fetch('/api/backup-config', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const j = await r.json();
+  return await r.json();
+}
+async function saveBackupConfig() {
+  const j = await postBackupConfig();
   if (!j.ok) { alert('保存に失敗しました: ' + (j.error || 'unknown')); return; }
   document.getElementById('bk-ssh-pw').value = '';
   const sm = document.getElementById('bk-ssh-msg');
@@ -3092,9 +3095,17 @@ async function runBackupNow() {
 }
 async function toggleBackupWatch() {
   const st = await (await fetch('/api/backup-status')).json();
+  const enabling = !st.watching;
+  if (enabling) {
+    // 画面の時刻・間隔を先に保存してから開始する。
+    // 保存忘れのまま開始すると旧設定で動き、変更した時刻に実行されないため。
+    const sj = await postBackupConfig();
+    if (!sj.ok) { alert('設定の保存に失敗しました: ' + (sj.error || 'unknown')); return; }
+    document.getElementById('bk-ssh-pw').value = '';
+  }
   const r = await fetch('/api/backup-watch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled: !st.watching }),
+    body: JSON.stringify({ enabled: enabling }),
   });
   const j = await r.json();
   if (!j.ok) { alert('切替に失敗しました'); return; }

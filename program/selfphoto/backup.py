@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -37,8 +38,10 @@ DEFAULT_INTERVAL = 300
 WATCH_MODES = ("interval", "time")
 DEFAULT_TIMES = ["02:00"]
 DEFAULT_DAYS = [0, 1, 2, 3, 4, 5, 6]
-# time モードのポーリング間隔（分境界を取りこぼさないよう短めに固定）
-WATCH_TIME_POLL_SEC = 30
+# time モードのポーリング間隔（分境界を取りこぼさないよう短めに固定。
+# 保存・起動直後は初回待ちなしに即時判定も行うため、対象分内の保存でも
+# 実行機会を逃さない）
+WATCH_TIME_POLL_SEC = 15
 
 # ローカル転送先として許可する場所。selfphoto-server.service の
 # ReadWritePaths と一致させること（PrivateTmp のため /tmp 等は不可）。
@@ -597,6 +600,10 @@ def run_once(detail: str = "manual") -> dict:
             return _finish_run(False, -1, "timeout (6h)", started, detail)
         except FileNotFoundError:
             return _finish_run(False, -1, "rsync not found", started, detail)
+    except Exception as e:  # noqa: BLE001
+        # 予期せぬ例外を握りつぶさず失敗として記録する。
+        # 握りつぶすと監視スレッドが死んで enabled のまま黙って止まるため。
+        return _finish_run(False, -1, f"error: {e}", started, detail)
     finally:
         with _run_lock:
             _running = False
@@ -676,27 +683,38 @@ def _watch_loop() -> None:
     # スレッド開始時点を基準にし、再起動直後の不要なコピーは避ける
     baseline = _photo_max_id()
     last_fired_minute: str | None = None
-    while True:
+
+    def _fire(detail: str) -> dict:
+        """dirty/grown 時の rsync 実行（発火・結果をサーバログにも残す）。"""
+        nonlocal baseline
+        print(f"backup watch: firing ({detail})", file=sys.stderr)
+        r = run_once(detail=detail)
+        if r.get("ok"):
+            baseline = _photo_max_id()
+        else:
+            tail = (r.get("logTail") or "")[-500:]
+            print(f"backup watch: failed ({detail}): {tail}",
+                  file=sys.stderr)
+        return r
+
+    def _tick() -> None:
+        nonlocal baseline, last_fired_minute
         w = normalize_watch(load_config().get("watch"))
-        poll = _current_interval() if w["mode"] == "interval" else WATCH_TIME_POLL_SEC
-        if stop is not None and stop.wait(poll):
-            break
-        if stop is None:
-            break
-        w = normalize_watch(load_config().get("watch"))
+        if not w.get("enabled"):
+            return
         if w["mode"] == "time":
-            # 指定時刻モード（rsyncgui の time モードと同じ）:
-            # 曜日・時刻が一致した分の最初のポーリングでのみ発火させる。
+            # 指定時刻モード:
+            # 曜日・時刻が一致した分の最初の判定でのみ発火させる。
             # dirty/grown が無ければ rsync 自体は走らせない（無駄な走査を避ける）。
             from datetime import datetime
             now = datetime.now().astimezone()
             hm = f"{now.hour:02d}:{now.minute:02d}"
             wday = (now.weekday() + 1) % 7  # 月曜=0 → 日曜=0 換算
             if not _time_matches(hm, wday, w["times"], w["days"]):
-                continue
+                return
             day_min = now.strftime("%Y-%m-%d %H:%M")
             if last_fired_minute == day_min:
-                continue
+                return
             last_fired_minute = day_min
             with _lock:
                 dirty = _dirty
@@ -705,10 +723,8 @@ def _watch_loop() -> None:
             if cur is not None and baseline is not None and cur < baseline:
                 baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
             if dirty or grown:
-                r = run_once(detail="watch-time")
-                if r.get("ok"):
-                    baseline = _photo_max_id()
-            continue
+                _fire("watch-time")
+            return
         with _lock:
             dirty = _dirty
         cur = _photo_max_id()
@@ -716,9 +732,32 @@ def _watch_loop() -> None:
         if cur is not None and baseline is not None and cur < baseline:
             baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
         if dirty or grown:
-            r = run_once(detail="watch")
-            if r.get("ok"):
-                baseline = _photo_max_id()
+            _fire("watch")
+
+    # 開始直後に即時判定する。ポーリング待ちだけだと対象分内の保存・再起動で
+    # 実行機会を逃して翌日送りになるため（初回ポーリングは +poll 秒後）。
+    # 発火済みキー・dirty/grown 判定は通常ポーリングと共通なので二重実行しない。
+    try:
+        _tick()
+    except Exception as e:  # noqa: BLE001
+        print(f"backup watch: initial tick failed: {e}", file=sys.stderr)
+    while True:
+        try:
+            w = normalize_watch(load_config().get("watch"))
+        except Exception as e:  # noqa: BLE001
+            print(f"backup watch: config reload failed: {e}", file=sys.stderr)
+            w = {"mode": "interval", "intervalSec": DEFAULT_INTERVAL}
+        poll = _current_interval() if w["mode"] == "interval" else WATCH_TIME_POLL_SEC
+        if stop is not None and stop.wait(poll):
+            break
+        if stop is None:
+            break
+        try:
+            _tick()
+        except Exception as e:  # noqa: BLE001
+            # 予期せぬ例外で監視スレッドが死ぬと enabled のまま黙って止まるため、
+            # 失敗をログに残して監視自体は継続する
+            print(f"backup watch: tick failed: {e}", file=sys.stderr)
 
 
 def set_watch(enabled: bool) -> dict:
