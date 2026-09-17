@@ -473,6 +473,75 @@ def rsync_available() -> bool:
     return shutil.which("rsync") is not None
 
 
+def sshpass_available() -> bool:
+    return shutil.which("sshpass") is not None
+
+
+def install_sshpass(timeout: int = 180) -> dict:
+    """sshpass をパッケージマネージャで導入する（サーバー側で実行）。
+
+    既に入っていれば {"ok": True, "already": True} を返す。
+    対応マネージャが無い・導入失敗時は {"ok": False, "error": ...} を返す。
+    """
+    if sshpass_available():
+        return {"ok": True, "already": True, "message": "sshpass は既にインストール済みです"}
+    managers: list[tuple[str, list[list[str]]]] = [
+        ("apt-get", [["apt-get", "update", "-qq"],
+                     ["apt-get", "install", "-y", "-qq", "sshpass"]]),
+        ("dnf", [["dnf", "install", "-y", "sshpass"]]),
+        ("yum", [["yum", "install", "-y", "sshpass"]]),
+        ("apk", [["apk", "add", "--no-cache", "sshpass"]]),
+        ("pacman", [["pacman", "-Sy", "--noconfirm", "sshpass"]]),
+        ("zypper", [["zypper", "--non-interactive", "install", "sshpass"]]),
+    ]
+    tried: list[str] = []
+    logs: list[str] = []
+    for mgr, cmds in managers:
+        if shutil.which(mgr) is None:
+            continue
+        tried.append(mgr)
+        ok_all = True
+        for cmd in cmds:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return {"ok": False,
+                        "error": f"sshpass のインストールがタイムアウトしました ({' '.join(cmd)})",
+                        "log": "\n".join(logs)[-4000:]}
+            except FileNotFoundError:
+                ok_all = False
+                break
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": str(e),
+                        "log": "\n".join(logs)[-4000:]}
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            if out:
+                logs.append(f"$ {' '.join(cmd)}\n{out[-2000:]}")
+            if proc.returncode != 0:
+                ok_all = False
+                logs.append(f"exit {proc.returncode}: {' '.join(cmd)}")
+                break
+        if ok_all and sshpass_available():
+            return {"ok": True, "already": False,
+                    "message": "sshpass をインストールしました",
+                    "log": "\n".join(logs)[-4000:]}
+        # このマネージャでは失敗 → 次の候補があれば試す
+    if not tried:
+        return {"ok": False,
+                "error": "対応するパッケージマネージャが見つかりません（手動で sshpass を導入してください）",
+                "log": "\n".join(logs)[-4000:]}
+    if sshpass_available():
+        return {"ok": True, "already": False,
+                "message": "sshpass をインストールしました",
+                "log": "\n".join(logs)[-4000:]}
+    tail = ("\n".join(logs)[-4000:] or
+            "インストールに失敗しました（ログなし）")
+    return {"ok": False,
+            "error": f"sshpass のインストールに失敗しました: {tail[-1000:]}",
+            "log": tail}
+
+
 def _finish_run(ok: bool, exit_code: int, log: str, started: float, detail: str = "") -> dict:
     global _last_run
     with _lock:

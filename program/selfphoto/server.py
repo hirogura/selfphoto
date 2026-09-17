@@ -282,7 +282,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.8"
+    server_version = "selfphoto/1.6.9"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -403,6 +403,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_backup_save()
             elif path == "/api/backup-ssh-test":
                 self.api_backup_ssh_test()
+            elif path == "/api/backup-sshpass-install":
+                self.api_backup_sshpass_install()
             elif path == "/api/backup-target-check":
                 self.api_backup_target_check()
             elif path == "/api/import":
@@ -1893,6 +1895,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": r.get("error", "ssh failed"),
                             "diagnostics": r.get("diagnostics")}, 400)
 
+    def api_backup_sshpass_install(self) -> None:
+        """sshpass をサーバー側に自動導入する（未導入時の確認用）。"""
+        from . import backup
+
+        r = backup.install_sshpass()
+        if r.get("ok"):
+            self.send_json({"ok": True, "message": r.get("message", "installed"),
+                            "already": bool(r.get("already", False)),
+                            "log": r.get("log", "")})
+        else:
+            self.send_json({"ok": False, "error": r.get("error", "install failed"),
+                            "log": r.get("log", "")}, 500)
+
     def api_backup_target_check(self) -> None:
         """ターゲットフォルダの確認。無い場合は作成する（mkdir -p）。"""
         from . import backup
@@ -2573,6 +2588,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="ctx-menu">
   <button data-act="rot-l">左回転</button>
   <button data-act="rot-r">右回転</button>
+  <button data-act="copy">コピー</button>
   <button data-act="edit">編集</button>
   <button data-act="dl">ダウンロード</button>
   <button data-act="del">削除</button>
@@ -2989,15 +3005,7 @@ async function testSshConnection() {
   setBkMsg('bk-ssh-msg', true, '確認中…');
   const diagEl = document.getElementById('bk-ssh-diag');
   if (diagEl) diagEl.textContent = '';
-  try {
-    const r = await fetch('/api/backup-ssh-test', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ssh: body.ssh }),
-    });
-    const j = await r.json();
-    if (j.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));
-    else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
-    const d = j.diagnostics;
+  const showDiag = (d) => {
     if (d && diagEl) {
       const keyTxt = (d.key && d.key.specified)
         ? `鍵ファイル: ${d.key.path} (${d.key.exists ? (d.key.readable ? 'あり・読める' : 'あり・読めない') : 'なし'})`
@@ -3005,6 +3013,55 @@ async function testSshConnection() {
       diagEl.textContent =
         `診断: 実行ユーザー=${d.runUser} / sshpass=${d.sshpassAvailable ? 'あり' : 'なし'} / ${keyTxt}`;
     }
+  };
+  try {
+    const r = await fetch('/api/backup-ssh-test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssh: body.ssh }),
+    });
+    const j = await r.json();
+    showDiag(j.diagnostics);
+    const d = j.diagnostics;
+    // sshpass が無い場合はインストール確認をして導入し、成功したら再確認する。
+    // パスワード認証に必要な場合（パスワード入力あり・エラー文言に sshpass を含む）が対象。
+    const needsSshpass = d && !d.sshpassAvailable
+      && ((body.ssh && body.ssh.password) || ((j.error || '').includes('sshpass')));
+    if (needsSshpass) {
+      if (!confirm('sshpass がインストールされていません。インストールしますか？')) {
+        if (!j.ok) setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
+        else setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));
+        return;
+      }
+      setBkMsg('bk-ssh-msg', true, 'sshpass をインストール中…');
+      let ins = null;
+      try {
+        const ir = await fetch('/api/backup-sshpass-install', { method: 'POST' });
+        ins = await ir.json();
+      } catch (err) {
+        setBkMsg('bk-ssh-msg', false, 'NG(インストール失敗): ' + err);
+        return;
+      }
+      if (!ins || !ins.ok) {
+        setBkMsg('bk-ssh-msg', false, 'NG(インストール失敗): ' + ((ins && ins.error) || 'unknown'));
+        return;
+      }
+      setBkMsg('bk-ssh-msg', true, 'インストールしました。再確認中…');
+      try {
+        const r2 = await fetch('/api/backup-ssh-test', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssh: body.ssh }),
+        });
+        const j2 = await r2.json();
+        showDiag(j2.diagnostics);
+        if (j2.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j2.message || 'SSH接続OK'));
+        else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j2.error || 'unknown'));
+      } catch (err) {
+        setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
+      }
+      return;
+    }
+    if (j.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));
+    else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
   } catch (err) {
     setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
   }
@@ -3648,8 +3705,9 @@ async function downloadUrl(url, filename) {
 }
 
 // ---------------- thumbnail context menu ----------------
-// サムネイル一覧の右クリックメニュー（左回転・右回転・編集・ダウンロード・削除）。
+// サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・ダウンロード・削除）。
 // 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
+// コピーは元画像をクリップボードへ書き込む（拡大画面の「コピー」と同じ処理）。
 let ctxPhoto = null;
 const ctxMenu = document.getElementById('ctx-menu');
 function hideCtxMenu() {
@@ -3684,6 +3742,7 @@ if (ctxMenu) {
       }
       hideCtxMenu();
       if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhoto(p, act === 'rot-l' ? 'left' : 'right');
+      else if (act === 'copy') await copyCtxPhoto(p);
       else if (act === 'edit') openEditorForPhoto(p);
       else if (act === 'dl') await downloadUrl(p.original, p.filename);
       else if (act === 'del') await deleteThumbPhoto(p);
@@ -4089,12 +4148,13 @@ function closeEditor(force) {
   ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
-document.getElementById('lb-copy').onclick = () => {
-  const p = state.photos[lbIndex];
-  if (!p || p.isVideo) return;
+// 元画像をクリップボードへコピーする共通処理（拡大画面の「コピー」と右クリック「コピー」で共用）。
+// 成功時は true、失敗時は alert 表示して false を返す。
+async function copyPhotoToClipboard(p) {
+  if (!p || p.isVideo) { alert('動画のコピーには対応していません'); return false; }
   if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
     alert('このブラウザは画像のコピーに対応していません');
-    return;
+    return false;
   }
   // Blob → PNG 変換（maxSide > 0 で長辺を指定pxに縮小。iPhone の巨大画像対策）
   const toPng = (blob, maxSide) => new Promise((res, rej) => {
@@ -4125,27 +4185,39 @@ document.getElementById('lb-copy').onclick = () => {
       const r = await fetch(p.original, { cache: 'force-cache' });
       return toPng(await r.blob(), 2048);
     })();
-    navigator.clipboard.write([new ClipboardItem({ 'image/png': pngP })]).then(
-      () => flashLbTitle('コピーしました'),
-      () => alert('コピーに失敗しました'));
-    return;
-  }
-  (async () => {
     try {
-      const r = await fetch(p.original, { cache: 'force-cache' });
-      const blob = await r.blob();
-      try {
-        await writeBlob(blob);
-      } catch (err) {
-        // 元形式が非対応の場合は PNG に変換して再試行
-        await writeBlob(await toPng(blob, 0));
-      }
-      flashLbTitle('コピーしました');
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngP })]);
+      return true;
     } catch (err) {
       alert('コピーに失敗しました');
+      return false;
     }
-  })();
+  }
+  try {
+    const r = await fetch(p.original, { cache: 'force-cache' });
+    const blob = await r.blob();
+    try {
+      await writeBlob(blob);
+    } catch (err) {
+      // 元形式が非対応の場合は PNG に変換して再試行
+      await writeBlob(await toPng(blob, 0));
+    }
+    return true;
+  } catch (err) {
+    alert('コピーに失敗しました');
+    return false;
+  }
+}
+document.getElementById('lb-copy').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p || p.isVideo) return;
+  if (await copyPhotoToClipboard(p)) flashLbTitle('コピーしました');
 };
+// 右クリックメニューからのコピー（メイン画面用。成功時はアラートで通知）。
+async function copyCtxPhoto(p) {
+  if (!p || p.isVideo) { alert('動画のコピーには対応していません'); return; }
+  if (await copyPhotoToClipboard(p)) alert('コピーしました');
+}
 function flashLbTitle(msg) {
   const t = document.getElementById('lb-title');
   const orig = t.textContent;
