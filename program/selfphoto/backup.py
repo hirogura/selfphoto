@@ -12,6 +12,8 @@ dirty のときだけ rsync を実行する。手動の「コピー実行」は�
     dirty なら実行（夜間実行用。cron と同じく分単位の判定）。
 
 固定オプション: -r -t -u -v --progress（除外: .upload-tmp/）。
+ミラーリング有効時は --delete を追加し、ソースに無いファイルを
+ターゲット側から削除する（既定は Off）。
 """
 from __future__ import annotations
 
@@ -78,6 +80,7 @@ def default_config() -> dict:
     return {
         "source": str(common.PHOTO_DIR),
         "target": "",
+        "mirror": False,
         "ssh": {"enabled": False, "host": "", "user": "",
                 "port": "22", "key": "", "password": ""},
         "watch": {"enabled": False, "mode": "interval",
@@ -152,6 +155,7 @@ def load_config() -> dict:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 cfg.update({k: v for k, v in saved.items() if k in cfg})
+                cfg["mirror"] = bool(saved.get("mirror", False))
                 if isinstance(saved.get("ssh"), dict):
                     cfg["ssh"].update({k: v for k, v in saved["ssh"].items()
                                        if k in cfg["ssh"]})
@@ -232,6 +236,8 @@ def build_command(cfg: dict) -> tuple[list[str], dict[str, str], str]:
     tgt = (cfg["target"] or "").strip()
     ssh = cfg.get("ssh") or {}
     argv = ["rsync"] + FIXED_OPTS + [f"--exclude={EXCLUDE_UPLOAD_TMP}"]
+    if cfg.get("mirror"):
+        argv += ["--delete"]
     env_add: dict[str, str] = {}
     if ssh.get("enabled") and (ssh.get("host") or "").strip():
         parts = ["ssh", "-o", "StrictHostKeyChecking=no"]
@@ -639,6 +645,7 @@ def status() -> dict:
         "watch": cfg.get("watch"),
         "source": cfg.get("source"),
         "target": cfg.get("target"),
+        "mirror": bool(cfg.get("mirror", False)),
         "lastRun": last,
     }
 
@@ -720,18 +727,22 @@ def _watch_loop() -> None:
                 dirty = _dirty
             cur = _photo_max_id()
             grown = (cur is not None and baseline is not None and cur > baseline)
-            if cur is not None and baseline is not None and cur < baseline:
-                baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
-            if dirty or grown:
+            shrunk = (cur is not None and baseline is not None and cur < baseline)
+            mirror = bool(load_config().get("mirror", False))
+            if shrunk and not mirror:
+                baseline = cur  # 非ミラー時は削除のみ何もしない（--delete 無し）
+            if dirty or grown or (mirror and shrunk):
                 _fire("watch-time")
             return
         with _lock:
             dirty = _dirty
         cur = _photo_max_id()
         grown = (cur is not None and baseline is not None and cur > baseline)
-        if cur is not None and baseline is not None and cur < baseline:
-            baseline = cur  # 削除のみは何もしない（rsync に --delete は無い）
-        if dirty or grown:
+        shrunk = (cur is not None and baseline is not None and cur < baseline)
+        mirror = bool(load_config().get("mirror", False))
+        if shrunk and not mirror:
+            baseline = cur  # 非ミラー時は削除のみ何もしない（--delete 無し）
+        if dirty or grown or (mirror and shrunk):
             _fire("watch")
 
     # 開始直後に即時判定する。ポーリング待ちだけだと対象分内の保存・再起動で

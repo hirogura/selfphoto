@@ -124,7 +124,9 @@ def _run_scan_job() -> None:
                 "removed": r.get("removed", 0),
                 "finishedAt": time.time(),
             }
-        if r.get("added"):
+        if r.get("added") or r.get("removed"):
+            # 削除分もミラーリング時はターゲットへ反映させるため dirty を立てる
+            #（無効時は無駄な1走査のみ）。
             try:
                 from . import backup
                 backup.mark_dirty()
@@ -282,7 +284,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.7.2"
+    server_version = "selfphoto/1.7.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -966,6 +968,14 @@ class Handler(BaseHTTPRequestHandler):
                     except OSError:
                         break
                     dp = dp.parent
+        if deleted:
+            # ミラーリング有効時は削除分もターゲットへ反映させるため
+            # dirty を立てて監視コピーの対象にする（無効時は無駄な1走査のみ）。
+            try:
+                from . import backup
+                backup.mark_dirty()
+            except Exception:
+                pass
         self.send_json({"ok": True, "deleted": deleted, "errors": errors})
 
     # ------------------------------------------------------------------
@@ -1784,6 +1794,7 @@ class Handler(BaseHTTPRequestHandler):
         ssh["password"] = "****" if ssh.get("password") else ""
         self.send_json({
             "source": cfg.get("source"), "target": cfg.get("target"),
+            "mirror": bool(cfg.get("mirror", False)),
             "ssh": ssh, "watch": cfg.get("watch"),
             "fixedOptions": backup.FIXED_OPTS,
             "exclude": backup.EXCLUDE_UPLOAD_TMP,
@@ -1805,6 +1816,8 @@ class Handler(BaseHTTPRequestHandler):
         for k in ("source", "target"):
             if k in body and isinstance(body[k], str):
                 cfg[k] = body[k].strip()
+        if "mirror" in body:
+            cfg["mirror"] = bool(body["mirror"])
         if isinstance(body.get("ssh"), dict):
             for k in ("enabled", "host", "user", "port", "key", "password"):
                 if k in body["ssh"]:
@@ -2813,12 +2826,14 @@ function renderBackup() {
   wrap.id = 'backup-form';
   wrap.innerHTML = `
     <h2>バックアップ設定</h2>
-    <p class="bk-desc">rsync で写真フォルダをコピーします（オプション固定: <code>-r -t -u -v --progress</code>）。</p>
+    <p class="bk-desc">rsync で写真フォルダをコピーします（オプション固定: <code>-r -t -u -v --progress</code>＋ミラーリング時のみ <code>--delete</code>）。</p>
     <label>ソースフォルダ<input id="bk-source" type="text"></label>
     <label>ターゲットフォルダ<input id="bk-target" type="text" placeholder="/mnt/backup/selfphoto または SSH時はリモートパス"></label>
     <div class="bk-row"><button id="bk-target-check" type="button">フォルダ確認</button><span id="bk-target-msg" class="bk-msg"></span></div>
     <div class="bk-desc">無い場合は自動で作成します（ローカルは <code>mkdir -p</code>、SSH先はリモートで <code>mkdir -p</code>）。</div>
     <div class="bk-row">除外: <code>.upload-tmp/</code>（固定）</div>
+    <label class="bk-check"><input id="bk-mirror" type="checkbox"> ソースに無いファイルを削除する（ミラーリング: <code>--delete</code>）</label>
+    <div class="bk-desc">チェックを入れると実行時に <code>--delete</code> を付けてターゲット側だけのファイルを削除します（通常はOff推奨）。</div>
     <fieldset><legend>SSHリモート接続</legend>
       <label class="bk-check"><input id="bk-ssh-on" type="checkbox"> SSH経由で転送する</label>
       <div id="bk-ssh-fields">
@@ -2863,6 +2878,7 @@ function renderBackup() {
     if (state.view !== 'backup') return;
     document.getElementById('bk-source').value = j.source || '';
     document.getElementById('bk-target').value = j.target || '';
+    document.getElementById('bk-mirror').checked = !!j.mirror;
     const ssh = j.ssh || {};
     document.getElementById('bk-ssh-on').checked = !!ssh.enabled;
     document.getElementById('bk-ssh-host').value = ssh.host || '';
@@ -2966,6 +2982,7 @@ function backupFormValues() {
   return {
     source: document.getElementById('bk-source').value,
     target: document.getElementById('bk-target').value,
+    mirror: document.getElementById('bk-mirror').checked,
     ssh: {
       enabled: document.getElementById('bk-ssh-on').checked,
       host: document.getElementById('bk-ssh-host').value,
