@@ -4493,9 +4493,24 @@ function applyAdjustments() {
   applyAdjustPixels(out.data, ed.adjust || {});
   edCtx.putImageData(out, 0, 0);
 }
+function buildEdToneLut(shadow, highlight) {
+  const sh = Math.max(-1, Math.min(1, shadow));
+  const hi = Math.max(-1, Math.min(1, highlight));
+  const lut = new Float64Array(1025);
+  for (let i = 0; i < lut.length; i++) {
+    const y = i / (lut.length - 1);
+    const dark = y < 0.5;
+    const x = dark ? 2 * y : 2 * (1 - y);
+    const amount = dark ? -2 * sh : 2 * hi;
+    const mapped = x / (x + (1 - x) * Math.exp(amount * (1 - x)));
+    lut[i] = (dark ? mapped / 2 : 1 - mapped / 2) * 255;
+  }
+  return lut;
+}
 function applyAdjustPixels(d, a) {
   const sh = ((a.shadow || 0)) / 100;
   const hi = ((a.highlight || 0)) / 100;
+  const toneLUT = sh !== 0 || hi !== 0 ? buildEdToneLut(sh, hi) : null;
   const st = ((a.saturation || 0)) / 100;
   const tp = ((a.colortemp || 0)) / 100;
   const tn = ((a.tint || 0)) / 100;
@@ -4509,18 +4524,22 @@ function applyAdjustPixels(d, a) {
   const gOff = -40 * tn;
   const satF = 1 + st;
   for (let i = 0; i < d.length; i += 4) {
-    let r = d[i] * rG, g = d[i + 1] + gOff, b = d[i + 2] * bG;
-    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    if (sh !== 0) {
-      let w = 1 - lum; w *= w;
-      if (sh > 0) { r += (255 - r) * sh * w; g += (255 - g) * sh * w; b += (255 - b) * sh * w; }
-      else { const m = 1 + sh * w; r *= m; g *= m; b *= m; }
+    let r = d[i], g = d[i + 1], b = d[i + 2];
+    if (toneLUT) {
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (lum > 0 && lum < 255) {
+        const pos = Math.min(1024, lum * 1024 / 255);
+        const index = Math.floor(pos);
+        const target = toneLUT[index] + (toneLUT[Math.min(index + 1, 1024)] - toneLUT[index]) * (pos - index);
+        let scale = target / lum;
+        const max = Math.max(r, g, b);
+        if (max > lum) scale = Math.min(scale, (255 - target) / (max - lum));
+        r = target + (r - lum) * scale;
+        g = target + (g - lum) * scale;
+        b = target + (b - lum) * scale;
+      }
     }
-    if (hi !== 0) {
-      const w = lum * lum;
-      if (hi > 0) { r += (255 - r) * hi * w; g += (255 - g) * hi * w; b += (255 - b) * hi * w; }
-      else { const m = 1 + hi * w; r *= m; g *= m; b *= m; }
-    }
+    r *= rG; g += gOff; b *= bG;
     r = cLUT[r < 0 ? 0 : (r > 255 ? 255 : Math.round(r))];
     g = cLUT[g < 0 ? 0 : (g > 255 ? 255 : Math.round(g))];
     b = cLUT[b < 0 ? 0 : (b > 255 ? 255 : Math.round(b))];
