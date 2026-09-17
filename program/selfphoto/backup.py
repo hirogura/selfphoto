@@ -43,7 +43,9 @@ WATCH_TIME_POLL_SEC = 30
 # ローカル転送先として許可する場所。selfphoto-server.service の
 # ReadWritePaths と一致させること（PrivateTmp のため /tmp 等は不可）。
 # サービスのプライベート名前空間に書いて「成功」扱いになるのを防ぐ。
-WRITABLE_ROOTS = [common.DATA_DIR, Path("/mnt"), Path("/media"), Path("/run/media")]
+# /opt/lxd-data はデータルート（selfphoto-data の兄弟に photo-back 等を
+# 作る想定）のため許可する。
+WRITABLE_ROOTS = [common.DATA_DIR, Path("/opt/lxd-data"), Path("/mnt"), Path("/media"), Path("/run/media")]
 
 
 def _inside_writable(path: Path) -> bool:
@@ -200,7 +202,7 @@ def validate_config(cfg: dict) -> str | None:
         if not Path(tgt).is_absolute():
             return "target must be absolute"
         if not _inside_writable(Path(tgt)):
-            roots = ", ".join([str(common.DATA_DIR), "/mnt", "/media", "/run/media"])
+            roots = ", ".join([str(common.DATA_DIR), "/opt/lxd-data", "/mnt", "/media", "/run/media"])
             return f"target not writable here (use {roots}, or SSH)"
     iv = (cfg.get("watch") or {}).get("intervalSec", DEFAULT_INTERVAL)
     try:

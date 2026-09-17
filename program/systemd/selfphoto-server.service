@@ -16,7 +16,8 @@ Environment=SELFPHPHOTO_PORT=3360
 NoNewPrivileges=true
 ProtectSystem=strict
 # バックアップ先として使う想定の場所（USB マウント等）を書き込み許可する
-ReadWritePaths=/opt/lxd-data/selfphoto-data /mnt /media /run/media
+# /opt/lxd-data はデータルート全体（selfphoto-data の兄弟に photo-back 等を作る想定）
+ReadWritePaths=/opt/lxd-data /mnt /media /run/media
 PrivateTmp=true
 
 [Install]
