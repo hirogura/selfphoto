@@ -282,7 +282,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.6.9"
+    server_version = "selfphoto/1.7.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2646,6 +2646,9 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <div class="ed-panel" id="ed-panel-crop">
         <label><input type="radio" name="ed-ratio" value="keep" checked> 比率維持</label>
         <label><input type="radio" name="ed-ratio" value="free"> 自由選択</label>
+        <label><input type="radio" name="ed-ratio" value="4:3"> 4:3</label>
+        <label><input type="radio" name="ed-ratio" value="3:2"> 3:2</label>
+        <label><input type="radio" name="ed-ratio" value="16:9"> 16:9</label>
         <div class="ed-row"><button id="ed-crop-apply">適用</button><button id="ed-crop-clear">クリア</button></div>
         <div class="ed-hint">ドラッグで範囲選択・枠内ドラッグで移動・枠辺ドラッグでサイズ変更</div>
       </div>
@@ -4541,13 +4544,24 @@ function edPos(e) {
 }
 
 // ---------------- crop ----------------
+// トリミングの縦横比を取得する。「比率維持」は元画像と同じ比率、
+// 「4:3」「3:2」「16:9」は固定比率、「自由選択」は null（比率固定なし）。
+function edCropAspect() {
+  const el = document.querySelector('input[name="ed-ratio"]:checked');
+  const v = el ? el.value : 'free';
+  if (v === 'keep') return edCanvas.width / edCanvas.height;
+  if (v === '4:3') return 4 / 3;
+  if (v === '3:2') return 3 / 2;
+  if (v === '16:9') return 16 / 9;
+  return null;
+}
 function cropRectOf() {
   const d = ed.cropDrag;
   if (!d) return null;
   let x0 = Math.min(d.x0, d.x1), y0 = Math.min(d.y0, d.y1);
   let w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
-  if (document.querySelector('input[name="ed-ratio"]:checked').value === 'keep') {
-    const a = edCanvas.width / edCanvas.height;
+  const a = edCropAspect();
+  if (a) {
     h = w / a;
     y0 = (d.y1 < d.y0) ? d.y0 - h : d.y0;
     x0 = (d.x1 < d.x0) ? d.x0 - w : d.x0;
@@ -4614,12 +4628,12 @@ function cropCursorFor(h) {
   if (h === 'e' || h === 'w') return 'ew-resize';
   return '';
 }
-// つまみドラッグでのサイズ変更後を計算する。「比率維持」なら元画像の縦横比を保つ。
+// つまみドラッグでのサイズ変更後を計算する。比率固定あり（比率維持・4:3・3:2・16:9）ならその縦横比を保つ。
 // handle: 動かす辺・角、o: 元枠、dx/dy: 画像ピクセルでの移動量。
 function cropResizeTo(handle, o, dx, dy) {
   const W = edCanvas.width, H = edCanvas.height, MIN = 2;
-  const keep = document.querySelector('input[name="ed-ratio"]:checked').value === 'keep';
-  const a = W / H;
+  const a = edCropAspect();
+  const keep = a !== null;
   let x = o.x, y = o.y, w = o.w, h = o.h;
   const clampFree = () => {
     w = Math.max(MIN, w); h = Math.max(MIN, h);
