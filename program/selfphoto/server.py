@@ -3209,7 +3209,7 @@ async function loadPhotos() {
     if (j.photos.length < state.limit) state.done = true;
     state.offset += j.photos.length;
     state.photos.push(...j.photos);
-    render();
+    render(true);
     document.getElementById('loading').textContent = state.done ? '' : 'もっと読み込む…';
   } finally {
     // 新しい世代の読み込み中はフラグを落とさない
@@ -3217,11 +3217,17 @@ async function loadPhotos() {
   }
 }
 
-function render() {
+const timelineState = { count: 0, month: '', day: '', grid: null };
+
+function render(append = false) {
   const tl = document.getElementById('timeline');
-  tl.innerHTML = '';
-  let curMonth = '', curDay = '', grid = null;
-  for (const p of state.photos) {
+  if (!append) {
+    lazyObserver.disconnect();
+    tl.innerHTML = '';
+    Object.assign(timelineState, { count: 0, month: '', day: '', grid: null });
+  }
+  let { month: curMonth, day: curDay, grid } = timelineState;
+  for (const p of state.photos.slice(timelineState.count)) {
     const d = new Date(p.capturedLocal);
     const ym = `${d.getFullYear()}年${String(d.getMonth()+1).padStart(2,'0')}月`;
     if (ym !== curMonth) {
@@ -3244,7 +3250,7 @@ function render() {
       const fd = folderOfDay(p);
       if (fd) {
         dh.dataset.folder = fd.folder;
-        const dhBox = makeHeadBox('day', fd.folder, fd.paths);
+        const dhBox = makeHeadBox('day', fd.folder);
         if (dhBox) dh.appendChild(dhBox);
       }
       dh.appendChild(Object.assign(document.createElement('span'), { textContent: day }));
@@ -3255,6 +3261,7 @@ function render() {
     }
     grid.appendChild(makeCell(p));
   }
+  Object.assign(timelineState, { count: state.photos.length, month: curMonth, day: curDay, grid });
   buildScrubber();
   refreshSelectionUi();
 }
@@ -3265,11 +3272,10 @@ function folderOfDay(p) {
   const seg = p.path.split('/');
   if (seg.length < 3) return null;
   const folder = seg.slice(0, 3).join('/');
-  const paths = state.photos.filter(x => x.path.startsWith(folder + '/')).map(x => x.path);
-  return { folder, paths };
+  return { folder };
 }
 
-function makeHeadBox(kind, key, paths) {
+function makeHeadBox(kind, key) {
   // 常に生成する（表示は body.selecting の CSS で切り替える）。
   // 選択モード突入時に DOM を作り直さなくても済むようにするため。
   const box = document.createElement('div');
@@ -3303,6 +3309,7 @@ function makeHeadBox(kind, key, paths) {
   } else {
     box.addEventListener('click', e => {
       e.stopPropagation();
+      const paths = state.photos.filter(p => p.path.startsWith(key + '/')).map(p => p.path);
       if (state.folderSel.has(key)) {
         // 明示チェック解除：フォルダの明示を外し、ファイル選択も外す
         state.folderSel.delete(key);
