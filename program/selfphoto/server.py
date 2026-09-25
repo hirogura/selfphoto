@@ -407,6 +407,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_backup_ssh_test()
             elif path == "/api/backup-sshpass-install":
                 self.api_backup_sshpass_install()
+            elif path == "/api/backup-ssh-hostkey-fix":
+                self.api_backup_ssh_hostkey_fix()
             elif path == "/api/backup-target-check":
                 self.api_backup_target_check()
             elif path == "/api/import":
@@ -1905,8 +1907,35 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "message": r.get("message", "SSH接続OK"),
                             "diagnostics": r.get("diagnostics")})
         else:
-            self.send_json({"ok": False, "error": r.get("error", "ssh failed"),
-                            "diagnostics": r.get("diagnostics")}, 400)
+            out: dict = {"ok": False, "error": r.get("error", "ssh failed"),
+                         "diagnostics": r.get("diagnostics")}
+            if r.get("hostKeyChanged"):
+                out["hostKeyChanged"] = True
+                out["hostKey"] = r.get("hostKey")
+            self.send_json(out, 400)
+
+    def api_backup_ssh_hostkey_fix(self) -> None:
+        """ホスト鍵変更時の古い鍵削除＋新規登録（確認表示の承諾後のみ呼ぶ）。"""
+        from . import backup
+
+        body = self._read_json_body() or {}
+        ssh = self._backup_ssh_from_body(body)
+        host = (ssh.get("host") or "").strip()
+        if not host and isinstance(body, dict):
+            host = (str(body.get("host") or "")).strip()
+        port = (ssh.get("port") or "22") if isinstance(ssh, dict) else "22"
+        if not host:
+            self.send_json({"ok": False, "error": "ssh host required"}, 400)
+            return
+        r = backup.fix_host_key(host, port)
+        if r.get("ok"):
+            self.send_json({"ok": True, "message": r.get("message", "updated"),
+                            "fingerprints": r.get("fingerprints", []),
+                            "knownHosts": r.get("knownHosts", ""),
+                            "log": r.get("log", "")})
+        else:
+            self.send_json({"ok": False, "error": r.get("error", "fix failed"),
+                            "log": r.get("log", "")}, 500)
 
     def api_backup_sshpass_install(self) -> None:
         """sshpass をサーバー側に自動導入する（未導入時の確認用）。"""
@@ -3052,6 +3081,58 @@ async function testSshConnection() {
     const j = await r.json();
     showDiag(j.diagnostics);
     const d = j.diagnostics;
+    const retestSsh = async () => {
+      try {
+        const r2 = await fetch('/api/backup-ssh-test', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssh: body.ssh }),
+        });
+        const j2 = await r2.json();
+        showDiag(j2.diagnostics);
+        if (j2.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j2.message || 'SSH接続OK'));
+        else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j2.error || 'unknown'));
+      } catch (err) {
+        setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
+      }
+    };
+    // ホスト鍵が変わっている場合は指紋の確認表示で更新できるようにする。
+    // 指紋は転送先の実物と照合してから承諾すること（中間者攻撃の排除用）。
+    if (j.hostKeyChanged && j.hostKey) {
+      const hk = j.hostKey;
+      const fp = hk.fingerprint || '(指紋不明)';
+      const msg = '転送先のホスト鍵が変わっています。\n\n'
+        + `ホスト: ${hk.host || ''}\n新しい指紋: ${fp}\n\n`
+        + '転送先で `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` の指紋と\n'
+        + '一致することを確認してからOKを押してください。\n'
+        + 'OKで古い鍵を削除し、新しい鍵を登録します。';
+      if (!confirm(msg)) {
+        setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j.error || 'unknown'));
+        return;
+      }
+      setBkMsg('bk-ssh-msg', true, 'ホスト鍵を更新中…');
+      let fx = null;
+      try {
+        const fr = await fetch('/api/backup-ssh-hostkey-fix', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssh: body.ssh }),
+        });
+        fx = await fr.json();
+      } catch (err) {
+        setBkMsg('bk-ssh-msg', false, 'NG(ホスト鍵更新失敗): ' + err);
+        return;
+      }
+      if (!fx || !fx.ok) {
+        setBkMsg('bk-ssh-msg', false, 'NG(ホスト鍵更新失敗): ' + ((fx && fx.error) || 'unknown'));
+        return;
+      }
+      const fps = (fx.fingerprints && fx.fingerprints.length)
+        ? fx.fingerprints.join('\n') : '(指紋不明)';
+      alert('ホスト鍵を更新しました。\n\n登録された指紋:\n' + fps
+        + '\n\n転送先の指紋と一致することを確認してください。再確認します。');
+      setBkMsg('bk-ssh-msg', true, '更新しました。再確認中…');
+      await retestSsh();
+      return;
+    }
     // sshpass が無い場合はインストール確認をして導入し、成功したら再確認する。
     // パスワード認証に必要な場合（パスワード入力あり・エラー文言に sshpass を含む）が対象。
     const needsSshpass = d && !d.sshpassAvailable
@@ -3117,18 +3198,7 @@ async function testSshConnection() {
         }
       }
       setBkMsg('bk-ssh-msg', true, 'インストールしました。再確認中…');
-      try {
-        const r2 = await fetch('/api/backup-ssh-test', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ssh: body.ssh }),
-        });
-        const j2 = await r2.json();
-        showDiag(j2.diagnostics);
-        if (j2.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j2.message || 'SSH接続OK'));
-        else setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + (j2.error || 'unknown'));
-      } catch (err) {
-        setBkMsg('bk-ssh-msg', false, 'NG(接続エラー): ' + err);
-      }
+      await retestSsh();
       return;
     }
     if (j.ok) setBkMsg('bk-ssh-msg', true, 'OK: ' + (j.message || 'SSH接続OK'));

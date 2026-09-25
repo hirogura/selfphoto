@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -412,10 +413,132 @@ def test_ssh_connection(ssh: dict) -> dict:
         return {"ok": True, "message": "SSH接続OK", "diagnostics": diag}
     log = ((proc.stdout or "") + (proc.stderr or "")).strip()
     err = f"ssh connection failed (exit {proc.returncode}): {log[:2000]}"
+    # ホスト鍵が変わっている場合は確認表示で更新できるよう情報を付ける。
+    # （認証ヒントより優先。鍵が変わったままでは認証に進めないため）
+    hk = hostkey_change_info(log, (ssh.get("host") or "").strip())
+    if hk:
+        err += (" [ホスト鍵変更: 転送先のホスト鍵が変わっています。"
+                "指紋を確認のうえ、確認表示から古い鍵の削除＋新規登録ができます]")
+        return {"ok": False, "error": err, "diagnostics": diag,
+                "hostKeyChanged": True, "hostKey": hk}
     # 認証失敗なら対処ヒントを付ける（接続エラーなのか設定ミスなのか分かるように）
     if proc.returncode == 255 or "Permission denied" in log:
         err += " [ヒント: " + _ssh_auth_hint(ssh, diag) + "]"
     return {"ok": False, "error": err, "diagnostics": diag}
+
+
+def known_hosts_path() -> Path:
+    """サーバー実行ユーザーの known_hosts パス（通常 /root/.ssh/known_hosts）。"""
+    return Path(os.path.expanduser("~")) / ".ssh" / "known_hosts"
+
+
+def hostkey_change_info(log: str, host: str) -> dict | None:
+    """REMOTE HOST IDENTIFICATION HAS CHANGED エラーなら情報を返す。
+
+    新しい鍵の指紋・known_hosts の場所を含める。該当しなければ None。
+    """
+    if "REMOTE HOST IDENTIFICATION HAS CHANGED" not in (log or ""):
+        return None
+    fp = None
+    m = re.search(r"fingerprint for the \S+ key sent by the remote host is ([A-Za-z0-9+/=:]+)", log)
+    if m:
+        fp = m.group(1)
+    kh = None
+    line = None
+    m2 = re.search(r"Offending \S+ key in (\S+):(\d+)", log)
+    if m2:
+        kh, line = m2.group(1), int(m2.group(2))
+    return {"host": host, "fingerprint": fp,
+            "knownHosts": kh or str(known_hosts_path()),
+            "line": line}
+
+
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _privileged_run(cmd: list[str], timeout: int = 60,
+                    input: str | None = None) -> subprocess.CompletedProcess:
+    """特権が必要な操作を実行する。
+
+    サンドボックス時（ProtectSystem=strict 等）は一時ユニットで制限なしに
+    実行する（sshpass 導入・api_update と同じ手法）。
+    """
+    if _system_install_blocked() and _systemd_run_available():
+        cmd = _unconfined_cmd(cmd)
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=timeout, input=input)
+
+
+def fix_host_key(host: str, port: int | str = 22, timeout: int = 60) -> dict:
+    """古いホスト鍵を削除し、新しい鍵を ssh-keyscan で登録する。
+
+    確認表示で指紋の照合承諾を得てから呼ぶこと。成功時は登録した鍵の
+    指紋一覧 (`fingerprints`) を返す。呼び出し側は転送先の実物と
+    照合するよう確認表示すること。
+    """
+    host = (host or "").strip()
+    if not _HOST_RE.match(host):
+        return {"ok": False, "error": f"invalid host: {host!r}"}
+    try:
+        port_n = int(port)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": f"invalid port: {port!r}"}
+    if not 1 <= port_n <= 65535:
+        return {"ok": False, "error": f"invalid port: {port!r}"}
+    if shutil.which("ssh-keygen") is None or shutil.which("ssh-keyscan") is None:
+        return {"ok": False, "error": "ssh-keygen/ssh-keyscan not found"}
+    kh = known_hosts_path()
+    logs: list[str] = []
+
+    def _step(cmd: list[str], what: str, stdin: str | None = None) -> tuple[bool, str]:
+        try:
+            proc = _privileged_run(cmd, timeout, stdin)
+        except subprocess.TimeoutExpired:
+            return False, f"{what} がタイムアウトしました"
+        except Exception as e:  # noqa: BLE001
+            return False, f"{what} に失敗しました: {e}"
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if proc.returncode != 0:
+            return False, f"{what} に失敗しました (exit {proc.returncode}): {out[:1000]}"
+        return True, out
+
+    ok, msg = _step(["mkdir", "-p", str(kh.parent)], "known_hosts フォルダの作成")
+    if not ok:
+        return {"ok": False, "error": msg}
+    _step(["chmod", "700", str(kh.parent)], "パーミッション設定")
+    # 古い鍵を削除する（非標準ポート時は [host]:port 形式も対象）。
+    # エントリが無い場合もあるので失敗しても続行する。
+    names = [host] + ([f"[{host}]:{port_n}"] if port_n != 22 else [])
+    for name in names:
+        ok, msg = _step(["ssh-keygen", "-f", str(kh), "-R", name], "古いホスト鍵の削除")
+        logs.append(msg)
+    ok, scan_out = _step(["ssh-keyscan", "-p", str(port_n),
+                          "-t", "rsa,ecdsa,ed25519", host], "ホスト鍵の取得")
+    if not ok or not scan_out.strip():
+        return {"ok": False,
+                "error": (msg if not ok else
+                          "ホスト鍵を取得できませんでした（ssh-keyscan の出力が空です）"),
+                "log": "\n".join(logs)[-2000:]}
+    ok, msg = _step(["tee", "-a", str(kh)], "known_hosts への登録", scan_out)
+    if not ok:
+        return {"ok": False, "error": msg, "log": "\n".join(logs)[-2000:]}
+    _step(["chmod", "600", str(kh)], "パーミッション設定")
+    # 登録した鍵の指紋を求める（読み取りだけなので直接実行でよい）
+    import tempfile
+
+    fps: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".pub", delete=True) as tf:
+            tf.write(scan_out if scan_out.endswith("\n") else scan_out + "\n")
+            tf.flush()
+            proc = subprocess.run(["ssh-keygen", "-l", "-f", tf.name],
+                                  capture_output=True, text=True, timeout=30)
+            fps = re.findall(r"SHA256:[A-Za-z0-9+/=]+", proc.stdout or "")
+    except Exception:
+        fps = []
+    return {"ok": True, "message": "ホスト鍵を更新しました",
+            "fingerprints": fps, "knownHosts": str(kh),
+            "log": "\n".join(logs)[-2000:]}
 
 
 def check_target(target: str, ssh: dict | None = None, create: bool = True) -> dict:
