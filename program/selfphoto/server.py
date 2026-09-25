@@ -1924,6 +1924,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": r.get("error", "install failed"),
                             "hint": r.get("hint", ""),
                             "canRetryWithoutUpdate": bool(r.get("canRetryWithoutUpdate", False)),
+                            "needsManual": bool(r.get("needsManual", False)),
+                            "manualCommand": r.get("manualCommand", ""),
                             "log": r.get("log", "")}, 500)
 
     def api_backup_target_check(self) -> None:
@@ -3095,12 +3097,19 @@ async function testSshConnection() {
         }
         if (!ins || !ins.ok) {
           const detail = 'NG(インストール失敗): ' + ((ins && ins.error) || 'unknown')
-            + (ins && ins.hint ? ('\n対処: ' + ins.hint) : '');
+            + (ins && ins.hint ? ('\n対処: ' + ins.hint) : '')
+            + (ins && ins.manualCommand ? ('\n端末で実行: ' + ins.manualCommand) : '');
           setBkMsg('bk-ssh-msg', false, detail);
           // ログ・対処ヒントを確認表示で見られるようにする（鍵認証への切替も促す）。
-          const more = 'インストールに失敗しました。詳細と対処法を表示しますか？\n\n'
-            + detail
-            + '\n\n（鍵認証なら sshpass は不要です。OKで詳細表示）';
+          // サンドボックス時は手動コマンドの確認表示にする。
+          const more = (ins && ins.needsManual && ins.manualCommand)
+            ? 'サーバーの制限により自動導入できません。端末で次のコマンドを実行してください:\n\n'
+              + ins.manualCommand
+              + '\n\n（鍵認証に切り替えれば sshpass は不要です）\n\n詳細と対処法を表示しますか？\n\n'
+              + detail
+            : 'インストールに失敗しました。詳細と対処法を表示しますか？\n\n'
+              + detail
+              + '\n\n（鍵認証なら sshpass は不要です。OKで詳細表示）';
           if (confirm(more)) {
             alert(detail + ((ins && ins.log) ? ('\n\n--- ログ ---\n' + ins.log) : ''));
           }

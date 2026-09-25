@@ -488,6 +488,41 @@ def sshpass_available() -> bool:
     return shutil.which("sshpass") is not None
 
 
+# マネージャ別の手動導入コマンド（サンドボックス時は端末での実行を案内する用）
+_MANUAL_INSTALL_CMDS = {
+    "apt-get": "sudo apt-get install -y sshpass",
+    "dnf": "sudo dnf install -y sshpass",
+    "yum": "sudo yum install -y sshpass",
+    "apk": "sudo apk add sshpass",
+    "pacman": "sudo pacman -Sy --noconfirm sshpass",
+    "zypper": "sudo zypper --non-interactive install sshpass",
+}
+
+
+def _system_install_blocked() -> str:
+    """サーバープロセスからシステムに書き込めない場合、そのパスを返す。
+
+    systemd ユニットが ProtectSystem=strict の場合、/usr・/var 等が
+    read-only になるため、apt/dnf 等での自動導入は原理的にできない。
+    問題なければ "" を返す。
+    """
+    for p in ("/usr/bin", "/var/lib/dpkg", "/var/lib/apt/lists"):
+        try:
+            if os.path.exists(p) and not os.access(p, os.W_OK):
+                return p
+        except OSError:
+            continue
+    return ""
+
+
+def _manual_install_command() -> str:
+    """見つかったマネージャに応じた手動導入コマンドを返す。"""
+    for mgr, cmd in _MANUAL_INSTALL_CMDS.items():
+        if shutil.which(mgr) is not None:
+            return cmd
+    return "sshpass を手動で導入"
+
+
 def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     """sshpass をパッケージマネージャで導入する（サーバー側で実行）。
 
@@ -499,9 +534,28 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     警告としてログに残す）。`skip_update=True` のときは update を省略する。
     失敗時は対処ヒント (`hint`) と update スキップ再試行の可否
     (`canRetryWithoutUpdate`) も返す。フロント側は確認表示で再試行できる。
+    systemd の ProtectSystem=strict 等でシステムが read-only の場合は
+    自動導入できないため、端末での手動実行コマンド (`manualCommand`) と
+    その旨 (`needsManual=True`) を返す。
     """
     if sshpass_available():
         return {"ok": True, "already": True, "message": "sshpass は既にインストール済みです"}
+    # サンドボックスで /usr・/var に書けない場合は試行せず手動案内にする。
+    # （試しても Read-only file system で必ず失敗するため）
+    blocked = _system_install_blocked()
+    if blocked:
+        manual = _manual_install_command()
+        return {"ok": False,
+                "error": (f"サーバープロセスからは自動導入できません"
+                          f"（{blocked} が書き込み不可）。端末で `{manual}` を実行してください。"),
+                "hint": ("Web UI の自動導入は、systemd の ProtectSystem=strict により "
+                         "/usr・/var 等が read-only になっているため動作しません。"
+                         "これは LXD の問題ではありません。"
+                         f"端末で `{manual}` を実行すれば導入できます（鍵認証に切り替えれば sshpass 自体が不要です）。"),
+                "needsManual": True,
+                "manualCommand": manual,
+                "canRetryWithoutUpdate": False,
+                "log": f"{blocked} is not writable (ProtectSystem sandbox suspected)"}
 
     def _run(cmd: list[str], logs: list[str]) -> tuple[bool, str]:
         """1コマンド実行。成功なら (True, 出力)。失敗なら (False, 出力)。"""
@@ -593,25 +647,30 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     tail = ("\n".join(logs)[-4000:] or
             "インストールに失敗しました（ログなし）")
     log_text = "\n".join(logs)
+    manual_needed = ("Read-only file system" in log_text or "Read-only" in log_text)
+    manual = _manual_install_command() if manual_needed else ""
     return {"ok": False,
-            "error": f"sshpass のインストールに失敗しました: {tail[-1000:]}",
+            "error": f"sshpass のインストールに失敗しました: {tail[-1000:]}" +
+                     (f" 端末で `{manual}` を実行してください。" if manual else ""),
             "log": tail,
             "hint": _sshpass_install_hint(log_text, apt_update_failed),
             # apt update 失敗が原因の可能性がある場合はスキップ再試行を促す。
             # 既にスキップ済みなら再試行しても同じなので False にする。
-            "canRetryWithoutUpdate": bool(apt_update_failed and not skip_update)}
+            "canRetryWithoutUpdate": bool(apt_update_failed and not skip_update and not manual_needed),
+            "needsManual": manual_needed,
+            "manualCommand": manual}
 
 
 def _sshpass_install_hint(log_text: str, apt_update_failed: bool) -> str:
     """install_sshpass 失敗時の対処ヒント（日本語）。ログから原因を推測する。"""
     log = log_text or ""
     if "Read-only file system" in log or "Read-only" in log:
-        return ("apt の更新用ファイル (/var/lib/apt/lists 等) が Read-only のため "
-                "apt-get update が失敗しています。"
-                "「update をスキップして再試行」を選ぶとキャッシュのまま "
-                "install を試します。改善しない場合は "
-                "`mount -o remount,rw /var/lib/apt/lists` 等で書き込み可能にするか、"
-                "サーバー上で `sudo apt-get install -y sshpass` を手動実行するか、"
+        return ("サーバープロセスから見ると apt の作業領域 (/var/lib/apt/lists・"
+                "/var/cache/apt・/var/lib/dpkg) や /usr が Read-only のため "
+                "update も install も失敗しています。原因の多くは systemd の "
+                "ProtectSystem=strict（LXD の問題ではありません）で、"
+                "update のスキップ再試行では改善しません。"
+                "端末で `sudo apt-get install -y sshpass` を実行するか、"
                 "鍵認証（sshpass 不要）への切替を検討してください。")
     if apt_update_failed or "apt-get update" in log:
         return ("apt-get update が失敗しています。ネットワーク・プロキシ・"
