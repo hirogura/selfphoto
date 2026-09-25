@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.1.7.5 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.1.7.6 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -227,6 +227,8 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
   （パスワード認証には `sshpass` が必要。`install.sh` が自動導入する。鍵認証を推奨）。
   「接続確認」で SSH 疎通だけをテスト（接続エラー切り分け用）、「設定保存」で保存。
   `sshpass` が未導入の場合は「インストールしますか？」の確認後に自動導入し、再確認する。
+  apt update 失敗時もキャッシュのまま install を試し、失敗時は update スキップ再試行の
+  確認表示と対処ヒント（Read-only 時の手動導入・鍵認証への切替など）を表示する。
   失敗時は実行ユーザー・鍵・sshpass の診断と対処ヒントを表示する。
   注意: SSH を実行するのはサーバー本体（root）のため、ターミナルで使える鍵・
   `~/.ssh/config`・ssh-agent はそのままでは使われない。
@@ -272,7 +274,7 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - `POST /api/backup-config` — バックアップ設定を保存
 - `POST /api/backup-run` — バックアップを今すぐ実行（バックグラウンド。ターゲットが無ければ自動作成）
 - `POST /api/backup-ssh-test` — SSH接続だけ確認（接続エラー切り分け用）
-- `POST /api/backup-sshpass-install` — `sshpass` をサーバー側に自動導入（未導入時の確認用）
+- `POST /api/backup-sshpass-install` — `sshpass` をサーバー側に自動導入（未導入時の確認用。`{"skipUpdate": true}` で apt update を省略して再試行可）
 - `POST /api/backup-target-check` — ターゲットフォルダ確認。無ければ作成（`mkdir -p`）
 - `GET /api/backup-status` — バックアップの状態・前回結果
 - `POST /api/backup-watch` — 監視の開始・停止（JSON `{"enabled": true}`）

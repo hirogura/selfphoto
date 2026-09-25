@@ -1912,13 +1912,18 @@ class Handler(BaseHTTPRequestHandler):
         """sshpass をサーバー側に自動導入する（未導入時の確認用）。"""
         from . import backup
 
-        r = backup.install_sshpass()
+        body = self._read_json_body() or {}
+        skip_update = bool(body.get("skipUpdate", False)) if isinstance(body, dict) else False
+        r = backup.install_sshpass(skip_update=skip_update)
         if r.get("ok"):
             self.send_json({"ok": True, "message": r.get("message", "installed"),
                             "already": bool(r.get("already", False)),
+                            "aptUpdateFailed": bool(r.get("aptUpdateFailed", False)),
                             "log": r.get("log", "")})
         else:
             self.send_json({"ok": False, "error": r.get("error", "install failed"),
+                            "hint": r.get("hint", ""),
+                            "canRetryWithoutUpdate": bool(r.get("canRetryWithoutUpdate", False)),
                             "log": r.get("log", "")}, 500)
 
     def api_backup_target_check(self) -> None:
@@ -3056,17 +3061,51 @@ async function testSshConnection() {
         return;
       }
       setBkMsg('bk-ssh-msg', true, 'sshpass をインストール中…');
+      const installSshpass = async (skipUpdate) => {
+        const ir = await fetch('/api/backup-sshpass-install', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skipUpdate: !!skipUpdate }),
+        });
+        return await ir.json();
+      };
       let ins = null;
       try {
-        const ir = await fetch('/api/backup-sshpass-install', { method: 'POST' });
-        ins = await ir.json();
+        ins = await installSshpass(false);
       } catch (err) {
         setBkMsg('bk-ssh-msg', false, 'NG(インストール失敗): ' + err);
         return;
       }
       if (!ins || !ins.ok) {
-        setBkMsg('bk-ssh-msg', false, 'NG(インストール失敗): ' + ((ins && ins.error) || 'unknown'));
-        return;
+        // apt update 失敗時は確認表示で update スキップ再試行できるようにする。
+        // （Read-only な /var/lib/apt/lists 等で update が exit 100 になる環境向け）
+        if (ins && ins.canRetryWithoutUpdate) {
+          const msg = 'sshpass のインストールに失敗しました。\n\n'
+            + (ins.error || 'unknown') + '\n\n'
+            + (ins.hint ? ('対処: ' + ins.hint + '\n\n') : '')
+            + 'apt update をスキップして再試行しますか？';
+          if (confirm(msg)) {
+            setBkMsg('bk-ssh-msg', true, 'apt update をスキップして再試行中…');
+            try {
+              ins = await installSshpass(true);
+            } catch (err) {
+              setBkMsg('bk-ssh-msg', false, 'NG(インストール失敗): ' + err);
+              return;
+            }
+          }
+        }
+        if (!ins || !ins.ok) {
+          const detail = 'NG(インストール失敗): ' + ((ins && ins.error) || 'unknown')
+            + (ins && ins.hint ? ('\n対処: ' + ins.hint) : '');
+          setBkMsg('bk-ssh-msg', false, detail);
+          // ログ・対処ヒントを確認表示で見られるようにする（鍵認証への切替も促す）。
+          const more = 'インストールに失敗しました。詳細と対処法を表示しますか？\n\n'
+            + detail
+            + '\n\n（鍵認証なら sshpass は不要です。OKで詳細表示）';
+          if (confirm(more)) {
+            alert(detail + ((ins && ins.log) ? ('\n\n--- ログ ---\n' + ins.log) : ''));
+          }
+          return;
+        }
       }
       setBkMsg('bk-ssh-msg', true, 'インストールしました。再確認中…');
       try {

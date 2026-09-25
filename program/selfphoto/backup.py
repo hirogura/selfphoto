@@ -488,17 +488,40 @@ def sshpass_available() -> bool:
     return shutil.which("sshpass") is not None
 
 
-def install_sshpass(timeout: int = 180) -> dict:
+def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     """sshpass をパッケージマネージャで導入する（サーバー側で実行）。
 
     既に入っていれば {"ok": True, "already": True} を返す。
     対応マネージャが無い・導入失敗時は {"ok": False, "error": ...} を返す。
+
+    apt 系では `apt-get update` が Read-only file system 等で失敗しても
+    中断せず、キャッシュのまま `apt-get install` を試す（update 失敗は
+    警告としてログに残す）。`skip_update=True` のときは update を省略する。
+    失敗時は対処ヒント (`hint`) と update スキップ再試行の可否
+    (`canRetryWithoutUpdate`) も返す。フロント側は確認表示で再試行できる。
     """
     if sshpass_available():
         return {"ok": True, "already": True, "message": "sshpass は既にインストール済みです"}
+
+    def _run(cmd: list[str], logs: list[str]) -> tuple[bool, str]:
+        """1コマンド実行。成功なら (True, 出力)。失敗なら (False, 出力)。"""
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, f"タイムアウトしました ({' '.join(cmd)})"
+        except FileNotFoundError:
+            return False, f"コマンドが見つかりません ({' '.join(cmd)})"
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if out:
+            logs.append(f"$ {' '.join(cmd)}\n{out[-2000:]}")
+        if proc.returncode != 0:
+            logs.append(f"exit {proc.returncode}: {' '.join(cmd)}")
+            return False, out
+        return True, out
+
     managers: list[tuple[str, list[list[str]]]] = [
-        ("apt-get", [["apt-get", "update", "-qq"],
-                     ["apt-get", "install", "-y", "-qq", "sshpass"]]),
+        ("apt-get", [["apt-get", "install", "-y", "-qq", "sshpass"]]),
         ("dnf", [["dnf", "install", "-y", "sshpass"]]),
         ("yum", [["yum", "install", "-y", "sshpass"]]),
         ("apk", [["apk", "add", "--no-cache", "sshpass"]]),
@@ -507,10 +530,20 @@ def install_sshpass(timeout: int = 180) -> dict:
     ]
     tried: list[str] = []
     logs: list[str] = []
+    apt_update_failed = False
     for mgr, cmds in managers:
         if shutil.which(mgr) is None:
             continue
         tried.append(mgr)
+        # apt 系は update を先に試すが、失敗しても install は試す。
+        # Read-only な /var/lib/apt/lists 等で update が exit 100 になる
+        # 環境（今回の報告ケース）でもキャッシュで入ることがあるため。
+        if mgr == "apt-get" and not skip_update:
+            ok_upd, _ = _run(["apt-get", "update", "-qq"], logs)
+            if not ok_upd:
+                apt_update_failed = True
+                logs.append("apt-get update に失敗しましたが、"
+                            "キャッシュのまま install を試します")
         ok_all = True
         for cmd in cmds:
             try:
@@ -519,13 +552,17 @@ def install_sshpass(timeout: int = 180) -> dict:
             except subprocess.TimeoutExpired:
                 return {"ok": False,
                         "error": f"sshpass のインストールがタイムアウトしました ({' '.join(cmd)})",
-                        "log": "\n".join(logs)[-4000:]}
+                        "log": "\n".join(logs)[-4000:],
+                        "hint": _sshpass_install_hint("\n".join(logs), False),
+                        "canRetryWithoutUpdate": False}
             except FileNotFoundError:
                 ok_all = False
                 break
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": str(e),
-                        "log": "\n".join(logs)[-4000:]}
+                        "log": "\n".join(logs)[-4000:],
+                        "hint": _sshpass_install_hint(str(e), False),
+                        "canRetryWithoutUpdate": False}
             out = ((proc.stdout or "") + (proc.stderr or "")).strip()
             if out:
                 logs.append(f"$ {' '.join(cmd)}\n{out[-2000:]}")
@@ -534,23 +571,68 @@ def install_sshpass(timeout: int = 180) -> dict:
                 logs.append(f"exit {proc.returncode}: {' '.join(cmd)}")
                 break
         if ok_all and sshpass_available():
+            msg = "sshpass をインストールしました"
+            if apt_update_failed:
+                msg += "（apt update は失敗しましたが install は成功）"
             return {"ok": True, "already": False,
-                    "message": "sshpass をインストールしました",
-                    "log": "\n".join(logs)[-4000:]}
+                    "message": msg,
+                    "log": "\n".join(logs)[-4000:],
+                    "aptUpdateFailed": apt_update_failed}
         # このマネージャでは失敗 → 次の候補があれば試す
     if not tried:
         return {"ok": False,
                 "error": "対応するパッケージマネージャが見つかりません（手動で sshpass を導入してください）",
-                "log": "\n".join(logs)[-4000:]}
+                "log": "\n".join(logs)[-4000:],
+                "hint": "対応するパッケージマネージャが無いため、手動で sshpass を導入するか、鍵認証を使ってください。",
+                "canRetryWithoutUpdate": False}
     if sshpass_available():
         return {"ok": True, "already": False,
                 "message": "sshpass をインストールしました",
-                "log": "\n".join(logs)[-4000:]}
+                "log": "\n".join(logs)[-4000:],
+                "aptUpdateFailed": apt_update_failed}
     tail = ("\n".join(logs)[-4000:] or
             "インストールに失敗しました（ログなし）")
+    log_text = "\n".join(logs)
     return {"ok": False,
             "error": f"sshpass のインストールに失敗しました: {tail[-1000:]}",
-            "log": tail}
+            "log": tail,
+            "hint": _sshpass_install_hint(log_text, apt_update_failed),
+            # apt update 失敗が原因の可能性がある場合はスキップ再試行を促す。
+            # 既にスキップ済みなら再試行しても同じなので False にする。
+            "canRetryWithoutUpdate": bool(apt_update_failed and not skip_update)}
+
+
+def _sshpass_install_hint(log_text: str, apt_update_failed: bool) -> str:
+    """install_sshpass 失敗時の対処ヒント（日本語）。ログから原因を推測する。"""
+    log = log_text or ""
+    if "Read-only file system" in log or "Read-only" in log:
+        return ("apt の更新用ファイル (/var/lib/apt/lists 等) が Read-only のため "
+                "apt-get update が失敗しています。"
+                "「update をスキップして再試行」を選ぶとキャッシュのまま "
+                "install を試します。改善しない場合は "
+                "`mount -o remount,rw /var/lib/apt/lists` 等で書き込み可能にするか、"
+                "サーバー上で `sudo apt-get install -y sshpass` を手動実行するか、"
+                "鍵認証（sshpass 不要）への切替を検討してください。")
+    if apt_update_failed or "apt-get update" in log:
+        return ("apt-get update が失敗しています。ネットワーク・プロキシ・"
+                "apt ソースの設定を確認してください。"
+                "「update をスキップして再試行」を選ぶとキャッシュのまま "
+                "install を試します。改善しない場合はサーバー上で "
+                "`sudo apt-get install -y sshpass` を手動実行するか、"
+                "鍵認証（sshpass 不要）への切替を検討してください。")
+    if "Permission denied" in log or "E: Could not open lock" in log or "are you root" in log.lower():
+        return ("権限不足でインストールできませんでした。"
+                "サーバー本体が root で動いていない可能性があります。"
+                "サーバー上で `sudo apt-get install -y sshpass` を手動実行するか、"
+                "鍵認証（sshpass 不要）への切替を検討してください。")
+    if "Unable to locate package" in log:
+        return ("パッケージ sshpass が見つかりません。"
+                "apt ソース（universe 等）が有効か確認し、"
+                "`sudo apt-get update && sudo apt-get install -y sshpass` を"
+                "手動実行するか、鍵認証（sshpass 不要）への切替を検討してください。")
+    return ("自動導入に失敗しました。サーバー上で "
+            "`sudo apt-get install -y sshpass`（環境に応じて dnf/yum/apk 等）を"
+            "手動実行するか、鍵認証（sshpass 不要）への切替を検討してください。")
 
 
 def _finish_run(ok: bool, exit_code: int, log: str, started: float, detail: str = "") -> dict:

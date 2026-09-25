@@ -46,7 +46,8 @@ if python3 -c "import PIL" 2>/dev/null; then
 else
   echo "Pillow が無いためインストールします..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq python3-pil
+    apt-get update -qq || echo "警告: apt-get update に失敗しました（キャッシュのまま続行します）" >&2
+    apt-get install -y -qq python3-pil
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y python3-pillow
   elif command -v yum >/dev/null 2>&1; then
@@ -75,7 +76,8 @@ if command -v rsync >/dev/null 2>&1; then
 else
   echo "rsync が無いためインストールします..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq rsync openssh-client sshpass
+    apt-get update -qq || echo "警告: apt-get update に失敗しました（キャッシュのまま続行します）" >&2
+    apt-get install -y -qq rsync openssh-client sshpass
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y rsync openssh-clients sshpass
   elif command -v yum >/dev/null 2>&1; then
