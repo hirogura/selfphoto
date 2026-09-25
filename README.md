@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.1.7.7 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.1.7.8 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -230,8 +230,10 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
   apt update 失敗時もキャッシュのまま install を試し、失敗時は update スキップ再試行の
   確認表示と対処ヒント（Read-only 時の手動導入・鍵認証への切替など）を表示する。
   ただし systemd の ProtectSystem=strict によりサーバープロセスからは /usr・/var が
-  read-only のため、Web UI からの自動導入は動作しない。
-  その場合は確認表示に出るコマンド（例: `sudo apt-get install -y sshpass`）を端末で実行する。
+  read-only のため、そのままでは apt が動作しない。
+  systemd 環境では制限なしの一時ユニット（`systemd-run + ProtectSystem=no`。
+  更新機能の `/api/update` と同じ手法）で自動導入を試みる。
+  systemd が無い環境では確認表示に出るコマンド（例: `sudo apt-get install -y sshpass`）を端末で実行する。
   失敗時は実行ユーザー・鍵・sshpass の診断と対処ヒントを表示する。
   注意: SSH を実行するのはサーバー本体（root）のため、ターミナルで使える鍵・
   `~/.ssh/config`・ssh-agent はそのままでは使われない。

@@ -523,6 +523,22 @@ def _manual_install_command() -> str:
     return "sshpass を手動で導入"
 
 
+def _systemd_run_available() -> bool:
+    """制限なしの一時ユニットが使える systemd 環境かどうか。"""
+    return (os.path.isdir("/run/systemd/system")
+            and shutil.which("systemd-run") is not None)
+
+
+def _unconfined_cmd(cmd: list[str]) -> list[str]:
+    """一時ユニットで制限なしに実行するコマンド列を作る。
+
+    api_update と同じ手法（ProtectSystem=no の一時ユニット）。
+    サーバ本体の ProtectSystem=strict を子プロセスに引き継がせない。
+    """
+    return ["systemd-run", "--pipe", "--wait", "--collect",
+            "-p", "ProtectSystem=no", *cmd]
+
+
 def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     """sshpass をパッケージマネージャで導入する（サーバー側で実行）。
 
@@ -535,33 +551,44 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
     失敗時は対処ヒント (`hint`) と update スキップ再試行の可否
     (`canRetryWithoutUpdate`) も返す。フロント側は確認表示で再試行できる。
     systemd の ProtectSystem=strict 等でシステムが read-only の場合は
-    自動導入できないため、端末での手動実行コマンド (`manualCommand`) と
+    制限なしの一時ユニット（systemd-run + ProtectSystem=no）で導入を試す。
+    それも使えない環境では端末での手動実行コマンド (`manualCommand`) と
     その旨 (`needsManual=True`) を返す。
     """
     if sshpass_available():
         return {"ok": True, "already": True, "message": "sshpass は既にインストール済みです"}
-    # サンドボックスで /usr・/var に書けない場合は試行せず手動案内にする。
-    # （試しても Read-only file system で必ず失敗するため）
+    # サンドボックスで /usr・/var に書けない場合、一時ユニットで制限なしに
+    # 実行する（api_update と同じ手法）。systemd が無ければ手動案内にする。
     blocked = _system_install_blocked()
+    unconfined = False
     if blocked:
-        manual = _manual_install_command()
-        return {"ok": False,
-                "error": (f"サーバープロセスからは自動導入できません"
-                          f"（{blocked} が書き込み不可）。端末で `{manual}` を実行してください。"),
-                "hint": ("Web UI の自動導入は、systemd の ProtectSystem=strict により "
-                         "/usr・/var 等が read-only になっているため動作しません。"
-                         "これは LXD の問題ではありません。"
-                         f"端末で `{manual}` を実行すれば導入できます（鍵認証に切り替えれば sshpass 自体が不要です）。"),
-                "needsManual": True,
-                "manualCommand": manual,
-                "canRetryWithoutUpdate": False,
-                "log": f"{blocked} is not writable (ProtectSystem sandbox suspected)"}
+        if _systemd_run_available():
+            unconfined = True
+        else:
+            manual = _manual_install_command()
+            return {"ok": False,
+                    "error": (f"サーバープロセスからは自動導入できません"
+                              f"（{blocked} が書き込み不可）。端末で `{manual}` を実行してください。"),
+                    "hint": ("Web UI の自動導入は、systemd の ProtectSystem=strict により "
+                             "/usr・/var 等が read-only になっているため動作しません。"
+                             "これは LXD の問題ではありません。"
+                             f"端末で `{manual}` を実行すれば導入できます（鍵認証に切り替えれば sshpass 自体が不要です）。"),
+                    "needsManual": True,
+                    "manualCommand": manual,
+                    "canRetryWithoutUpdate": False,
+                    "log": f"{blocked} is not writable (ProtectSystem sandbox suspected)"}
+
+    def _exec(cmd: list[str]) -> subprocess.CompletedProcess:
+        """1コマンド実行。一時ユニット方式なら制限なしで実行する。"""
+        if unconfined:
+            cmd = _unconfined_cmd(cmd)
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout)
 
     def _run(cmd: list[str], logs: list[str]) -> tuple[bool, str]:
         """1コマンド実行。成功なら (True, 出力)。失敗なら (False, 出力)。"""
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=timeout)
+            proc = _exec(cmd)
         except subprocess.TimeoutExpired:
             return False, f"タイムアウトしました ({' '.join(cmd)})"
         except FileNotFoundError:
@@ -601,8 +628,7 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
         ok_all = True
         for cmd in cmds:
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True,
-                                      timeout=timeout)
+                proc = _exec(cmd)
             except subprocess.TimeoutExpired:
                 return {"ok": False,
                         "error": f"sshpass のインストールがタイムアウトしました ({' '.join(cmd)})",
@@ -628,10 +654,13 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
             msg = "sshpass をインストールしました"
             if apt_update_failed:
                 msg += "（apt update は失敗しましたが install は成功）"
+            if unconfined:
+                msg += "（一時ユニットで導入）"
             return {"ok": True, "already": False,
                     "message": msg,
                     "log": "\n".join(logs)[-4000:],
-                    "aptUpdateFailed": apt_update_failed}
+                    "aptUpdateFailed": apt_update_failed,
+                    "unconfined": unconfined}
         # このマネージャでは失敗 → 次の候補があれば試す
     if not tried:
         return {"ok": False,
@@ -643,11 +672,13 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
         return {"ok": True, "already": False,
                 "message": "sshpass をインストールしました",
                 "log": "\n".join(logs)[-4000:],
-                "aptUpdateFailed": apt_update_failed}
+                "aptUpdateFailed": apt_update_failed,
+                "unconfined": unconfined}
     tail = ("\n".join(logs)[-4000:] or
             "インストールに失敗しました（ログなし）")
     log_text = "\n".join(logs)
-    manual_needed = ("Read-only file system" in log_text or "Read-only" in log_text)
+    manual_needed = (unconfined
+                     or "Read-only file system" in log_text or "Read-only" in log_text)
     manual = _manual_install_command() if manual_needed else ""
     return {"ok": False,
             "error": f"sshpass のインストールに失敗しました: {tail[-1000:]}" +
@@ -655,7 +686,7 @@ def install_sshpass(timeout: int = 180, skip_update: bool = False) -> dict:
             "log": tail,
             "hint": _sshpass_install_hint(log_text, apt_update_failed),
             # apt update 失敗が原因の可能性がある場合はスキップ再試行を促す。
-            # 既にスキップ済みなら再試行しても同じなので False にする。
+            # 既にスキップ済み・一時ユニット方式では再試行しても同じなので False にする。
             "canRetryWithoutUpdate": bool(apt_update_failed and not skip_update and not manual_needed),
             "needsManual": manual_needed,
             "manualCommand": manual}
