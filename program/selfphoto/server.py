@@ -3153,6 +3153,13 @@ async function checkTargetFolder() {
   }
 }
 async function runBackupNow() {
+  // 画面の入力を先に保存してから実行する。
+  // フォルダ確認は未保存の入力で動くため、保存忘れのまま実行すると
+  // 保存済み設定（target 未設定など）で invalid config になる。
+  // 監視開始（toggleBackupWatch）と同じ方式。
+  const sj = await postBackupConfig();
+  if (!sj.ok) { alert('設定の保存に失敗しました: ' + (sj.error || 'unknown')); return; }
+  document.getElementById('bk-ssh-pw').value = '';
   const r = await fetch('/api/backup-run', { method: 'POST' });
   const j = await r.json();
   if (!j.ok && !j.started) { alert('実行できませんでした: ' + (j.error || 'unknown')); return; }
