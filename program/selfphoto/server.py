@@ -6,6 +6,7 @@ tailscale serve 前提なので 127.0.0.1 のみで待ち受ける。
 """
 from __future__ import annotations
 
+import base64
 import html
 import json
 import mimetypes
@@ -13,11 +14,13 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
@@ -53,6 +56,537 @@ _IMPORT_LOCK = threading.Lock()
 _IMPORT_STATE: dict = {"running": False, "last": None, "progress": None}
 _SCAN_LOCK = threading.Lock()
 _SCAN_STATE: dict = {"running": False, "last": None, "progress": None}
+
+
+# ------------------------------------------------------------------
+# sync: 別PCの selfphoto と1日1回・片方向で同期する（予備機用途・同期先は1箇所のみ）。
+# 写真ライブラリは大容量のため、増分同期のみ行う。データの流れは常に
+# 同期元→同期先の pull（同期先が取得しにいく）で、push は行わない。
+# 同期対象: photos テーブル行 + PHOTO_DIR 原本 + edit-photo/ 原本。
+# サムネイル・プレビューは同期せず、受信側で再生成する（thumb_done=0）。
+# ------------------------------------------------------------------
+SYNC_CFG_FILE = common.DATA_DIR / "sync_config.json"
+SYNC_ROLE_SOURCE = "source"
+SYNC_ROLE_DEST = "destination"
+SYNC_CHUNK_LEN = 32 * 1024 * 1024
+SYNC_MAX_CHUNKS = 16
+SYNC_MAX_BATCH = 256 * 1024 * 1024
+SYNC_MAX_BODY = 4 * 1024 * 1024
+SYNC_PHOTO_COLS = ["path", "filename", "captured_at", "captured_local", "year",
+                   "month", "is_video", "width", "height", "camera", "size",
+                   "mtime", "hash", "thumb_path", "thumb_done"]
+DEFAULT_SYNC_CONFIG = {
+    "role": SYNC_ROLE_SOURCE, "peer": "", "peer_name": "",
+    "sync_time": "03:00", "last_sync": "", "last_result": "",
+}
+_SYNC_RUN_LOCK = threading.Lock()
+
+
+def load_sync_config() -> dict:
+    cfg = dict(DEFAULT_SYNC_CONFIG)
+    try:
+        data = json.loads(SYNC_CFG_FILE.read_text())
+        if isinstance(data, dict):
+            for k in DEFAULT_SYNC_CONFIG:
+                if isinstance(data.get(k), str):
+                    cfg[k] = data[k]
+    except Exception:
+        pass
+    if cfg.get("role") not in (SYNC_ROLE_SOURCE, SYNC_ROLE_DEST):
+        cfg["role"] = SYNC_ROLE_SOURCE
+    if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", cfg.get("sync_time") or ""):
+        cfg["sync_time"] = DEFAULT_SYNC_CONFIG["sync_time"]
+    return cfg
+
+
+def save_sync_config(cfg: dict) -> None:
+    tmp = SYNC_CFG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    os.replace(tmp, SYNC_CFG_FILE)
+
+
+def valid_sync_time(s) -> bool:
+    return isinstance(s, str) and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", s) is not None
+
+
+def is_valid_peer_url(u) -> bool:
+    if not isinstance(u, str) or not u or len(u) > 500:
+        return False
+    try:
+        from urllib.parse import urlsplit
+        p = urlsplit(u)
+        return p.scheme in ("http", "https") and bool(p.hostname)
+    except Exception:
+        return False
+
+
+def tailscale_status():
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        d = json.loads(r.stdout or "{}")
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def get_self_base_url() -> str:
+    d = tailscale_status()
+    try:
+        if d:
+            dns = ((d.get("Self") or {}).get("DNSName") or "").rstrip(".")
+            if dns:
+                return f"https://{dns}:{common.PORT}"
+    except Exception:
+        pass
+    return ""
+
+
+def get_self_host_name() -> str:
+    d = tailscale_status()
+    try:
+        if d:
+            return ((d.get("Self") or {}).get("HostName") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def get_sync_peer_list() -> list:
+    d = tailscale_status()
+    if not d:
+        return []
+    peers = d.get("Peer") or {}
+    self_dns = (((d.get("Self") or {}).get("DNSName")) or "").rstrip(".")
+    out = []
+    for p in peers.values():
+        if not isinstance(p, dict):
+            continue
+        dns = (p.get("DNSName") or "").rstrip(".")
+        if not dns or dns == self_dns:
+            continue
+        name = p.get("HostName") or dns
+        ips = p.get("TailscaleIPs") or []
+        out.append({"name": name, "dns": dns, "url": f"https://{dns}:{common.PORT}",
+                    "ip": ips[0] if ips else "", "os": p.get("OS") or "",
+                    "online": bool(p.get("Online"))})
+    # 稼働中を先頭に
+    out.sort(key=lambda x: (not x["online"], x["name"].lower()))
+    return out
+
+
+def _http_get_json(url: str, timeout: int = 60):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers={"User-Agent": "selfphoto-sync"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_post_json(url: str, payload, timeout: int = 300):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=body,
+                                 headers={"User-Agent": "selfphoto-sync",
+                                          "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        text = resp.read().decode("utf-8") or "{}"
+        try:
+            return json.loads(text)
+        except ValueError:
+            return {}
+
+
+def _sync_bytes_hash(data: bytes) -> str:
+    import hashlib
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
+def build_sync_manifest() -> dict:
+    conn = common.get_db()
+    photos = []
+    for r in conn.execute(
+            f"SELECT {','.join(SYNC_PHOTO_COLS)} FROM photos ORDER BY path"):
+        photos.append(dict(r))
+    edits = []
+    try:
+        base = common.EDIT_PHOTO_DIR
+        if base.is_dir():
+            for p in sorted(base.iterdir()):
+                if p.is_file() and p.suffix.lower() in common.PHOTO_EXTS:
+                    try:
+                        st = p.stat()
+                        edits.append({"rel": p.name, "size": st.st_size,
+                                      "mtime": st.st_mtime})
+                    except OSError:
+                        continue
+    except OSError:
+        pass
+    return {"version": 1,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "photos": photos, "edits": edits}
+
+
+def read_sync_chunk(rel: str, offset: int, length: int) -> dict:
+    """rel は "photo/<path>" または "edit/<name>"。チャンクを base64 で返す。"""
+    if rel.startswith("photo/"):
+        p = safe_join(common.PHOTO_DIR, rel[len("photo/"):])
+    elif rel.startswith("edit/"):
+        name = rel[len("edit/"):]
+        if not name or "/" in name:
+            raise ValueError("bad rel")
+        p = safe_join(common.EDIT_PHOTO_DIR, name)
+    else:
+        raise ValueError("bad rel")
+    if p is None or not p.is_file():
+        raise FileNotFoundError(rel)
+    size = p.stat().st_size
+    offset = max(0, int(offset or 0))
+    length = max(0, min(int(length or 0), SYNC_CHUNK_LEN))
+    if offset >= size:
+        data = b""
+    else:
+        with p.open("rb") as f:
+            f.seek(offset)
+            data = f.read(length)
+    return {"rel": rel, "offset": offset,
+            "content": base64.b64encode(data).decode("ascii"),
+            "mtime": p.stat().st_mtime, "size": size}
+
+
+def _sync_thumb_path(rel: str):
+    return common.THUMB_DIR / (Path(rel).with_suffix("").as_posix() + "_thumb.webp")
+
+
+def _sync_view_path(rel: str):
+    from . import ingest
+    return common.VIEW_DIR / ingest.view_rel_path(rel)
+
+
+def mark_sync_result(ok: bool, message) -> None:
+    try:
+        cfg = load_sync_config()
+        if ok:
+            cfg["last_sync"] = datetime.now().isoformat(timespec="seconds")
+        cfg["last_result"] = str(message or "")[:300]
+        save_sync_config(cfg)
+    except Exception:
+        pass
+
+
+def run_sync_pull(peer_url: str) -> str:
+    """同期先が同期元から増分取得する。"""
+    if not is_valid_peer_url(peer_url):
+        raise ValueError("同期元が未設定です")
+    peer = peer_url.rstrip("/")
+    try:
+        manifest = _http_get_json(peer + "/api/sync/manifest", timeout=60)
+    except Exception as e:
+        raise RuntimeError(f"取得に失敗しました: {e}")
+    if (not isinstance(manifest, dict)
+            or not isinstance(manifest.get("photos"), list)
+            or not isinstance(manifest.get("edits"), list)):
+        raise ValueError("相手の応答が不正です")
+    exported_at = manifest.get("exported_at", "") if isinstance(
+        manifest.get("exported_at"), str) else ""
+
+    conn = common.get_db()
+    local_rows = {}
+    for r in conn.execute(f"SELECT {','.join(SYNC_PHOTO_COLS)} FROM photos"):
+        local_rows[r["path"]] = dict(r)
+    src_rows = {}
+    for r in manifest["photos"]:
+        if not isinstance(r, dict):
+            continue
+        p = r.get("path")
+        if (not isinstance(p, str) or not p or ".." in p.split("/")
+                or not SAFE_REL.match("a/" + p)):
+            continue
+        if not isinstance(r.get("hash"), str):
+            continue
+        src_rows[p] = r
+
+    need = {}  # "photo/<path>" or "edit/<name>" -> manifest側情報
+    upserts = []  # (row, reset_thumb)
+    for p, s in src_rows.items():
+        loc = local_rows.get(p)
+        if loc is None:
+            need["photo/" + p] = s
+            upserts.append((s, True))
+        elif (loc.get("hash") or "") != (s.get("hash") or ""):
+            need["photo/" + p] = s
+            upserts.append((s, True))
+        else:
+            upserts.append((s, False))
+
+    local_edits = {}
+    try:
+        base = common.EDIT_PHOTO_DIR
+        if base.is_dir():
+            for e in base.iterdir():
+                if e.is_file() and e.suffix.lower() in common.PHOTO_EXTS:
+                    try:
+                        st = e.stat()
+                        local_edits[e.name] = (st.st_size, st.st_mtime)
+                    except OSError:
+                        continue
+    except OSError:
+        pass
+    src_edits = {}
+    for e in manifest["edits"]:
+        if (isinstance(e, dict) and isinstance(e.get("rel"), str) and e["rel"]
+                and "/" not in e["rel"]):
+            src_edits[e["rel"]] = e
+    for name, e in src_edits.items():
+        try:
+            cur = local_edits.get(name)
+            same = (cur is not None and cur[0] == int(e.get("size", -1))
+                    and abs(cur[1] - float(e.get("mtime", 0))) <= 1.0)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            need["edit/" + name] = e
+
+    del_paths = [p for p in local_rows if p not in src_rows]
+    del_edits = [n for n in local_edits if n not in src_edits]
+
+    # --- ファイル取得（チャンク分割・バッチ取得） ---
+    items = list(need.items())
+    received = {}  # rel -> {"parts": [(offset, bytes)], "mtime": float}
+    i = 0
+    while i < len(items):
+        chunks, total = [], 0
+        while (i < len(items) and len(chunks) < SYNC_MAX_CHUNKS
+                and total < SYNC_MAX_BATCH):
+            rel, meta = items[i]
+            try:
+                size = int(meta.get("size", 0) or 0)
+            except (TypeError, ValueError):
+                size = 0
+            off, first = 0, True
+            while off < size or (size == 0 and first):
+                ln = min(SYNC_CHUNK_LEN, size - off) if size else 0
+                chunks.append({"rel": rel, "offset": off, "length": ln})
+                total += ln
+                off += ln if ln else 1
+                first = False
+                if len(chunks) >= SYNC_MAX_CHUNKS or total >= SYNC_MAX_BATCH:
+                    break
+            i += 1
+        try:
+            resp = _http_post_json(peer + "/api/sync/files", {"chunks": chunks},
+                                   timeout=300)
+        except Exception as e:
+            raise RuntimeError(f"ファイル取得に失敗しました: {e}")
+        files = resp.get("files") if isinstance(resp, dict) else None
+        if not isinstance(files, list):
+            raise ValueError("相手の応答が不正です")
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            rel = f.get("rel")
+            if rel not in need:
+                continue
+            try:
+                part = base64.b64decode(f.get("content") or "", validate=True)
+            except Exception:
+                raise ValueError(f"ファイルデータが不正です: {rel}")
+            ent = received.setdefault(rel, {"parts": [], "mtime": f.get("mtime")})
+            ent["parts"].append((int(f.get("offset") or 0), part))
+            if isinstance(f.get("mtime"), (int, float)):
+                ent["mtime"] = f["mtime"]
+    if set(received) != set(need):
+        raise ValueError("ファイル取得が不完全です")
+
+    # --- 検証・書き込み ---
+    errors = []
+    for rel, ent in received.items():
+        data = b"".join(b for _, b in sorted(ent["parts"]))
+        meta = need[rel]
+        if rel.startswith("photo/"):
+            try:
+                if _sync_bytes_hash(data) != (meta.get("hash") or ""):
+                    errors.append(f"{rel}: ハッシュ不一致")
+                    continue
+            except (TypeError, ValueError):
+                errors.append(f"{rel}: ハッシュ検証失敗")
+                continue
+            dst = safe_join(common.PHOTO_DIR, rel[len("photo/"):])
+        else:
+            dst = safe_join(common.EDIT_PHOTO_DIR, rel[len("edit/"):])
+        if dst is None:
+            errors.append(f"{rel}: 不正なパス")
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            if isinstance(ent.get("mtime"), (int, float)) and ent["mtime"] > 0:
+                os.utime(dst, (time.time(), ent["mtime"]))
+        except OSError as e:
+            errors.append(f"{rel}: 書き込み失敗 ({e})")
+    if errors:
+        raise RuntimeError("ファイル反映に失敗しました: " + "; ".join(errors[:5]))
+
+    # --- DB 反映 ---
+    try:
+        for s, reset_thumb in upserts:
+            if reset_thumb:
+                thumb_path, thumb_done = None, 0
+            else:
+                loc = local_rows.get(s["path"], {})
+                thumb_path, thumb_done = loc.get("thumb_path"), loc.get("thumb_done", 0)
+            conn.execute(
+                """INSERT INTO photos (path, filename, captured_at, captured_local,
+                                      year, month, is_video, width, height, camera,
+                                      size, mtime, hash, thumb_path, thumb_done)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(path) DO UPDATE SET
+                     filename=excluded.filename, captured_at=excluded.captured_at,
+                     captured_local=excluded.captured_local, year=excluded.year,
+                     month=excluded.month, is_video=excluded.is_video,
+                     width=excluded.width, height=excluded.height,
+                     camera=excluded.camera, size=excluded.size,
+                     mtime=excluded.mtime, hash=excluded.hash,
+                     thumb_path=excluded.thumb_path, thumb_done=excluded.thumb_done""",
+                (s.get("path"), s.get("filename"), s.get("captured_at"),
+                 s.get("captured_local"), s.get("year"), s.get("month"),
+                 s.get("is_video", 0), s.get("width"), s.get("height"),
+                 s.get("camera"), s.get("size", 0), s.get("mtime", 0),
+                 s.get("hash"), thumb_path, thumb_done))
+        # 取得・更新した行の旧サムネイル/プレビューは無効なので消す
+        for s, reset_thumb in upserts:
+            if not reset_thumb:
+                continue
+            for cand in (_sync_thumb_path(s["path"]),):
+                try:
+                    if cand.is_file():
+                        cand.unlink()
+                except OSError:
+                    pass
+            try:
+                v = _sync_view_path(s["path"])
+                if v.is_file():
+                    v.unlink()
+            except OSError:
+                pass
+        # 同期元に無い行・ファイルを削除（片方向ミラー）
+        for p in del_paths:
+            conn.execute("DELETE FROM photos WHERE path=?", (p,))
+            for cand in (safe_join(common.PHOTO_DIR, p), _sync_thumb_path(p)):
+                try:
+                    if cand is not None and cand.is_file():
+                        cand.unlink()
+                except OSError:
+                    pass
+            try:
+                v = _sync_view_path(p)
+                if v.is_file():
+                    v.unlink()
+            except OSError:
+                pass
+        for name in del_edits:
+            for cand in (safe_join(common.EDIT_PHOTO_DIR, name),
+                         common.THUMB_DIR / "edit" / (Path(name).stem + "_thumb.webp"),
+                         common.VIEW_DIR / (Path(name).with_suffix("").as_posix() + "_view.webp")):
+                try:
+                    if cand is not None and cand.is_file():
+                        cand.unlink()
+                except OSError:
+                    pass
+        # thumb_done=1 なのに実ファイルが無い行は再生成対象に戻す
+        for r in conn.execute("SELECT id, path FROM photos WHERE thumb_done=1"):
+            try:
+                if not _sync_thumb_path(r["path"]).is_file():
+                    conn.execute("UPDATE photos SET thumb_done=0 WHERE id=?",
+                                 (r["id"],))
+            except OSError:
+                pass
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    # 空になった日付フォルダを掃除
+    try:
+        for _ in range(4):
+            removed = False
+            for d in sorted(common.PHOTO_DIR.rglob("*"), reverse=True):
+                if d.is_dir() and d != common.PHOTO_DIR:
+                    try:
+                        d.rmdir()
+                        removed = True
+                    except OSError:
+                        pass
+            if not removed:
+                break
+    except OSError:
+        pass
+    mark_sync_result(True, f"同期しました（受信・{exported_at}）")
+    return exported_at
+
+
+def trigger_remote_pull(peer_url: str) -> None:
+    if not is_valid_peer_url(peer_url):
+        raise ValueError("同期先が未設定です")
+    try:
+        _http_post_json(peer_url.rstrip("/") + "/api/sync/trigger",
+                        {"peer_url": get_self_base_url()}, timeout=15)
+    except Exception as e:
+        raise RuntimeError(f"相手側への同期開始指示に失敗しました: {e}")
+
+
+def _bg_sync_pull(peer_url: str) -> None:
+    try:
+        run_sync_pull(peer_url)
+    except Exception as e:
+        mark_sync_result(False, f"同期に失敗しました: {e}")
+
+
+def sync_scheduler_tick(now=None) -> bool:
+    # 自動同期は同期先のみが実行する（常に同期元→同期先の pull）。
+    cfg = load_sync_config()
+    if cfg.get("role") != SYNC_ROLE_DEST:
+        return False
+    peer = (cfg.get("peer") or "").strip()
+    if not peer or not is_valid_peer_url(peer):
+        return False
+    if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", cfg.get("sync_time") or ""):
+        return False
+    now = now or datetime.now()
+    if now.strftime("%H:%M") < cfg["sync_time"]:
+        return False
+    last = cfg.get("last_sync") or ""
+    if len(last) >= 10 and last[:10] == now.date().isoformat():
+        return False
+    if not _SYNC_RUN_LOCK.acquire(blocking=False):
+        return False
+    try:
+        run_sync_pull(peer)
+        return True
+    except Exception as e:
+        mark_sync_result(False, f"自動同期に失敗しました: {e}")
+        return False
+    finally:
+        try:
+            _SYNC_RUN_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+def sync_scheduler_loop() -> None:
+    while True:
+        try:
+            time.sleep(30)
+            sync_scheduler_tick()
+        except Exception:
+            continue
 
 
 def _run_import_job(src: str) -> None:
@@ -415,6 +949,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_import()
             elif path == "/api/scan":
                 self.api_scan()
+            elif path == "/api/sync/config":
+                self.api_sync_config_save()
+            elif path == "/api/sync/role":
+                self.api_sync_role()
+            elif path == "/api/sync/files":
+                self.api_sync_files()
+            elif path == "/api/sync/run":
+                self.api_sync_run()
+            elif path == "/api/sync/trigger":
+                self.api_sync_trigger()
+            elif path == "/api/sync/stop":
+                self.api_sync_stop()
+            elif path == "/api/sync/unlink":
+                self.api_sync_unlink()
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -529,6 +1077,20 @@ class Handler(BaseHTTPRequestHandler):
             self.api_months()
         elif path == "/api/search":
             self.api_search(parsed.query)
+        elif path == "/api/sync/config":
+            cfg = load_sync_config()
+            cfg["self_url"] = get_self_base_url()
+            cfg["self_name"] = get_self_host_name()
+            self.send_json(cfg)
+        elif path == "/api/sync/peers":
+            self.send_json({"peers": get_sync_peer_list(),
+                            "self_url": get_self_base_url(),
+                            "self_name": get_self_host_name()})
+        elif path == "/api/sync/manifest":
+            try:
+                self.send_json(build_sync_manifest())
+            except Exception as e:  # noqa: BLE001
+                self.send_json({"error": str(e)}, 500)
         elif path.startswith("/thumb/"):
             self.serve_thumb(path[len("/thumb/"):])
         elif path.startswith("/view/"):
@@ -2035,6 +2597,253 @@ class Handler(BaseHTTPRequestHandler):
                   "progress": _SCAN_STATE["progress"]}
         self.send_json(st)
 
+    # ------------------------------------------------------------------
+    # sync: 別PCとの片方向同期（同期先が同期元から pull）
+    # ------------------------------------------------------------------
+    def api_sync_config_save(self) -> None:
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        role = body.get("role", "")
+        peer = body.get("peer", "")
+        peer = peer.strip() if isinstance(peer, str) else ""
+        peer_name = body.get("peer_name", "")
+        peer_name = peer_name.strip()[:100] if isinstance(peer_name, str) else ""
+        sync_time = body.get("sync_time", "")
+        sync_time = sync_time.strip() if isinstance(sync_time, str) else ""
+        if role not in (SYNC_ROLE_SOURCE, SYNC_ROLE_DEST):
+            self.send_json({"ok": False,
+                            "error": "同期元・同期先のいずれかを指定してください"}, 400)
+            return
+        if peer and not is_valid_peer_url(peer):
+            self.send_json({"ok": False, "error": "同期先のURLが不正です"}, 400)
+            return
+        if not valid_sync_time(sync_time):
+            self.send_json({"ok": False,
+                            "error": "同期時刻は HH:MM 形式で指定してください"}, 400)
+            return
+        cfg = load_sync_config()
+        cfg["role"] = role
+        cfg["peer"] = peer
+        cfg["peer_name"] = peer_name
+        cfg["sync_time"] = sync_time
+        save_sync_config(cfg)
+        # 相手側の役割を反対にそろえる（相手が旧バージョン等で失敗しても保存自体は成功扱い）
+        peer_notified, peer_message = False, ""
+        if peer and body.get("notify_peer", True):
+            opposite = SYNC_ROLE_DEST if role == SYNC_ROLE_SOURCE else SYNC_ROLE_SOURCE
+            try:
+                _http_post_json(peer.rstrip("/") + "/api/sync/role",
+                                {"role": opposite, "peer_url": get_self_base_url(),
+                                 "peer_name": get_self_host_name()}, timeout=15)
+                peer_notified = True
+                peer_message = "相手側を「%s」に切り替えました" % (
+                    "同期先" if opposite == SYNC_ROLE_DEST else "同期元")
+            except Exception as e:  # noqa: BLE001
+                peer_message = ("相手側への通知に失敗しました"
+                                "（相手のselfphotoを最新版に更新してください）: %s" % e)
+        self.send_json({"ok": True, "peer_notified": peer_notified,
+                        "peer_message": peer_message})
+
+    def api_sync_role(self) -> None:
+        """相手PCからの役割連動用。自分の役割を相手の反対に設定する。"""
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        role = body.get("role", "")
+        peer_url = body.get("peer_url", "")
+        peer_url = peer_url.strip() if isinstance(peer_url, str) else ""
+        peer_name = body.get("peer_name", "")
+        peer_name = peer_name.strip()[:100] if isinstance(peer_name, str) else ""
+        if role not in (SYNC_ROLE_SOURCE, SYNC_ROLE_DEST):
+            self.send_json({"ok": False, "error": "invalid role"}, 400)
+            return
+        if peer_url and not is_valid_peer_url(peer_url):
+            self.send_json({"ok": False, "error": "invalid peer_url"}, 400)
+            return
+        cfg = load_sync_config()
+        cfg["role"] = role
+        if peer_url:
+            cfg["peer"] = peer_url
+            cfg["peer_name"] = peer_name
+        save_sync_config(cfg)
+        self.send_json({"ok": True, "role": role})
+
+    def api_sync_files(self) -> None:
+        """同期元がファイルチャンクを返す。{"chunks": [{rel, offset, length}]}"""
+        try:
+            body = self._read_json_body(max_len=SYNC_MAX_BODY)
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        chunks = body.get("chunks") if isinstance(body, dict) else None
+        if not isinstance(chunks, list) or not chunks or len(chunks) > 64:
+            self.send_json({"ok": False, "error": "chunks required (1-64)"}, 400)
+            return
+        total = 0
+        for c in chunks:
+            if not isinstance(c, dict):
+                self.send_json({"ok": False, "error": "bad chunk"}, 400)
+                return
+            try:
+                ln = int(c.get("length") or 0)
+            except (TypeError, ValueError):
+                self.send_json({"ok": False, "error": "bad chunk"}, 400)
+                return
+            if ln < 0 or ln > SYNC_CHUNK_LEN:
+                self.send_json({"ok": False, "error": "bad chunk length"}, 400)
+                return
+            total += ln
+            if total > SYNC_MAX_BATCH + SYNC_CHUNK_LEN:
+                self.send_json({"ok": False, "error": "batch too large"}, 400)
+                return
+        files = []
+        for c in chunks:
+            rel = c.get("rel")
+            if not isinstance(rel, str):
+                self.send_json({"ok": False, "error": "bad rel"}, 400)
+                return
+            try:
+                files.append(read_sync_chunk(rel, c.get("offset") or 0,
+                                             c.get("length") or 0))
+            except FileNotFoundError:
+                self.send_json({"ok": False, "error": f"not found: {rel}"}, 404)
+                return
+            except ValueError:
+                self.send_json({"ok": False, "error": f"bad rel: {rel}"}, 400)
+                return
+            except OSError as e:
+                self.send_json({"ok": False, "error": f"read failed: {e}"}, 500)
+                return
+        self.send_json({"files": files})
+
+    def api_sync_run(self) -> None:
+        cfg = load_sync_config()
+        peer = (cfg.get("peer") or "").strip()
+        if not peer:
+            self.send_json({"ok": False,
+                            "error": "同期相手が未設定です。先に相手を選択して保存してください"},
+                           400)
+            return
+        if not _SYNC_RUN_LOCK.acquire(blocking=False):
+            self.send_json({"ok": False,
+                            "error": "同期を実行中です。しばらく待ってください"}, 409)
+            return
+        try:
+            if cfg.get("role") == SYNC_ROLE_DEST:
+                try:
+                    exported_at = run_sync_pull(peer)
+                except (ValueError, RuntimeError) as e:
+                    mark_sync_result(False, f"手動同期に失敗しました: {e}")
+                    self.send_json({"ok": False, "error": str(e)}, 500)
+                    return
+                self.send_json({"ok": True, "direction": "pull",
+                                "message": f"同期元から取得しました（{exported_at}）"})
+            elif cfg.get("role") == SYNC_ROLE_SOURCE:
+                # 同期元側の「今すぐ同期」は相手（同期先）に pull 実行を指示する
+                try:
+                    trigger_remote_pull(peer)
+                except (ValueError, RuntimeError) as e:
+                    mark_sync_result(False, f"手動同期に失敗しました: {e}")
+                    self.send_json({"ok": False, "error": str(e)}, 500)
+                    return
+                self.send_json({"ok": True, "direction": "trigger",
+                                "message": "相手側で同期を開始しました。"
+                                           "完了は相手側の同期状態で確認してください"})
+            else:
+                self.send_json({"ok": False, "error": "役割が不正です"}, 400)
+        finally:
+            try:
+                _SYNC_RUN_LOCK.release()
+            except RuntimeError:
+                pass
+
+    def api_sync_trigger(self) -> None:
+        """同期元からの指示で pull をバックグラウンド実行する。"""
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if body is not None and not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        cfg = load_sync_config()
+        peer = (cfg.get("peer") or "").strip()
+        if not peer:
+            self.send_json({"ok": False, "error": "同期相手が未設定です"}, 400)
+            return
+        if not _SYNC_RUN_LOCK.acquire(blocking=False):
+            self.send_json({"ok": False, "error": "同期を実行中です"}, 409)
+            return
+        _SYNC_RUN_LOCK.release()
+        threading.Thread(target=_bg_sync_pull, args=(peer,), daemon=True).start()
+        self.send_json({"ok": True, "started": True})
+
+    def api_sync_stop(self) -> None:
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if body is not None and not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        cfg = load_sync_config()
+        old_peer = (cfg.get("peer") or "").strip()
+        cfg["peer"] = ""
+        cfg["peer_name"] = ""
+        cfg["last_result"] = (
+            f"同期を停止しました（{datetime.now().isoformat(timespec='seconds')}）")
+        save_sync_config(cfg)
+        peer_notified, peer_message = False, ""
+        if old_peer and (body or {}).get("notify_peer", True):
+            try:
+                r = _http_post_json(old_peer.rstrip("/") + "/api/sync/unlink",
+                                    {"peer_url": get_self_base_url()}, timeout=15)
+                peer_notified = bool(isinstance(r, dict) and r.get("unlinked"))
+                peer_message = ("相手側の同期設定も解除しました" if peer_notified
+                                else "相手側への通知は届きましたが、"
+                                     "相手の相手指定は既に外れていました")
+            except Exception as e:  # noqa: BLE001
+                peer_message = ("相手側への通知に失敗しました"
+                                "（相手のselfphotoを最新版に更新するか、"
+                                f"相手側でも停止してください）: {e}")
+        self.send_json({"ok": True, "peer_notified": peer_notified,
+                        "peer_message": peer_message})
+
+    def api_sync_unlink(self) -> None:
+        """相手PCからの停止連動用。相手が同期を停止したら自分の相手指定も外す。"""
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        peer_url = body.get("peer_url", "")
+        peer_url = peer_url.strip().rstrip("/") if isinstance(peer_url, str) else ""
+        cfg = load_sync_config()
+        unlinked = False
+        if peer_url and (cfg.get("peer") or "").rstrip("/") == peer_url:
+            cfg["peer"] = ""
+            cfg["peer_name"] = ""
+            cfg["last_result"] = "相手側で同期が停止されたため、相手指定を解除しました"
+            save_sync_config(cfg)
+            unlinked = True
+        self.send_json({"ok": True, "unlinked": unlinked})
+
     def _write_chunk(self, data: bytes) -> None:
         if data:
             self.wfile.write(f"{len(data):X}\r\n".encode() + data + b"\r\n")
@@ -2143,6 +2952,43 @@ body.modal-open { overflow: hidden; }
   background: var(--card); border: 1px solid var(--line); color: var(--fg);
   padding: 16px 26px; border-radius: 12px; font-size: 14px; font-weight: 600;
 }
+/* ---------------- sync modal ---------------- */
+#sync-ov {
+  position: fixed; inset: 0; z-index: 200; display: none;
+  background: rgba(0,0,0,.72); align-items: center; justify-content: center;
+}
+#sync-ov.on { display: flex; }
+#sync-ov .sync-box {
+  background: var(--card); border: 1px solid var(--line); color: var(--fg);
+  padding: 20px 22px; border-radius: 12px; width: min(520px, calc(100vw - 40px));
+  max-height: calc(100vh - 60px); overflow-y: auto;
+}
+#sync-ov .sync-box h3 { margin: 0 0 4px; font-size: 15px; }
+#sync-ov .sync-desc { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.sync-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.sync-row label { font-size: 13px; font-weight: 700; min-width: 70px; }
+.sync-role { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.sync-role button { border: 0; background: none; color: var(--muted); padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.sync-role button.active { background: var(--accent); color: #fff; }
+.sync-row select, .sync-row input[type=time] {
+  flex: 1; min-width: 200px; padding: 8px 10px; font-size: 13px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; outline: none;
+}
+.sync-row select:focus, .sync-row input[type=time]:focus { border-color: var(--accent); }
+.sync-hint { font-size: 12px; color: var(--muted); }
+#sync-status {
+  font-size: 12px; color: var(--muted); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px; white-space: pre-wrap;
+}
+.sync-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sync-actions button {
+  padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  background: var(--chip); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+}
+.sync-actions button:hover { border-color: var(--accent); }
+.sync-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sync-actions button:disabled { opacity: .5; cursor: wait; }
 #sidebar nav { display: flex; flex-direction: column; gap: 2px; }
 #sidebar nav button {
   display: flex; align-items: center; gap: 10px;
@@ -2591,6 +3437,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-photos" class="active"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="M21 16l-5-5-9 9"/></svg></span><span class="lbl">写真</span><span class="nav-count" id="nav-photos-count"></span></button>
     <button id="nav-edits"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L20 8l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></span><span class="lbl">編集写真</span><span class="nav-count" id="nav-edits-count"></span></button>
     <button id="nav-search"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></span><span class="lbl">検索</span></button>
+    <button id="nav-sync"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></span><span class="lbl">同期</span></button>
     <input id="search-box" type="search" placeholder="ファイル名・カメラで検索…" autocomplete="off">
     <button id="nav-backup"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">バックアップ</span></button>
     <button id="nav-import"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg></span><span class="lbl">インポート</span></button>
@@ -2766,6 +3613,36 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="ed-saveas">別名保存</button>
     <button id="ed-tolibrary">編集フォルダに保存</button>
     <button id="ed-close">閉じる</button>
+  </div>
+</div>
+<div id="sync-ov">
+  <div class="sync-box">
+    <h3>🔄 selfphoto 同期</h3>
+    <div class="sync-desc">別PCの selfphoto と1日1回・片方向で同期します（予備機用途・同期先は1箇所のみ）。写真原本の増分同期で、サムネイルは受信側で再生成します。相手PCも最新版の selfphoto に更新してください。</div>
+    <div class="sync-row">
+      <label>役割</label>
+      <div class="sync-role">
+        <button id="sync-role-source">同期元（送る側）</button>
+        <button id="sync-role-dest">同期先（受ける側）</button>
+      </div>
+    </div>
+    <div class="sync-desc" id="sync-role-desc"></div>
+    <div class="sync-row">
+      <label>同期相手</label>
+      <select id="sync-peer"><option value="">-- 選択してください --</option></select>
+    </div>
+    <div class="sync-row">
+      <label>同期時刻</label>
+      <input type="time" id="sync-time" value="03:00">
+      <span class="sync-hint">1日1回この時刻以降に自動同期</span>
+    </div>
+    <div id="sync-status">読み込み中…</div>
+    <div class="sync-actions">
+      <button id="btn-sync-save" class="primary">保存</button>
+      <button id="btn-sync-now" class="primary">⚡ 今すぐ同期</button>
+      <button id="btn-sync-close">閉じる</button>
+      <button id="btn-sync-stop">同期を停止</button>
+    </div>
   </div>
 </div>
 <script>
@@ -5726,6 +6603,132 @@ upmRetry.addEventListener('click', () => {
   upmPump();
 });
 
+// ---------- sync ----------
+let syncRole = 'source';
+function setSyncRole(r) {
+  syncRole = (r === 'destination') ? 'destination' : 'source';
+  document.getElementById('sync-role-source').classList.toggle('active', syncRole === 'source');
+  document.getElementById('sync-role-dest').classList.toggle('active', syncRole === 'destination');
+  document.getElementById('sync-role-desc').textContent = syncRole === 'source'
+    ? 'このPCが「同期元」: 相手（同期先）へ写真データを送ります。保存すると相手は自動で「同期先」になります。'
+    : 'このPCが「同期先」: 相手（同期元）から写真データを受け取ります。保存すると相手は自動で「同期元」になります。';
+}
+function renderSyncStatus(cfg) {
+  const roleLabel = cfg.role === 'destination' ? '同期先' : '同期元';
+  const peerLabel = cfg.peer_name ? cfg.peer_name + '（' + cfg.peer + '）' : (cfg.peer || '未設定');
+  const last = cfg.last_sync ? '最終同期: ' + cfg.last_sync : '最終同期: まだありません';
+  const result = cfg.last_result ? '結果: ' + cfg.last_result : '';
+  document.getElementById('sync-status').textContent =
+    '役割: ' + roleLabel + ' ／ 相手: ' + peerLabel + ' ／ 時刻: ' + (cfg.sync_time || '--:--') + ' ／ ' + last + (result ? ' ／ ' + result : '');
+}
+async function openSyncModal() {
+  document.getElementById('sync-ov').classList.add('on');
+  document.getElementById('sync-status').textContent = '読み込み中…';
+  setSyncRole('source');
+  try {
+    const [peerRes, cfgRes] = await Promise.all([fetch('/api/sync/peers'), fetch('/api/sync/config')]);
+    const peers = await peerRes.json();
+    const cfg = await cfgRes.json();
+    if (!cfg || cfg.error) { document.getElementById('sync-status').textContent = '設定の読み込みに失敗しました'; return; }
+    setSyncRole(cfg.role === 'destination' ? 'destination' : 'source');
+    const sel = document.getElementById('sync-peer');
+    const cur = cfg.peer || '';
+    const list = (peers && peers.peers) || [];
+    sel.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = ''; def.textContent = '-- 選択してください --';
+    sel.appendChild(def);
+    list.forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.url; o.dataset.name = p.name;
+      o.textContent = p.name + ' [' + p.dns + ']' + (p.online ? '' : '（オフライン）');
+      if (p.url === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+    if (cur && !list.some(p => p.url === cur)) {
+      const o = document.createElement('option');
+      o.value = cur; o.selected = true;
+      o.textContent = (cfg.peer_name ? cfg.peer_name + ' [' + cur + ']' : cur) + '（一覧外）';
+      sel.appendChild(o);
+    }
+    document.getElementById('sync-time').value = cfg.sync_time || '03:00';
+    renderSyncStatus(cfg);
+  } catch (e) {
+    document.getElementById('sync-status').textContent = '設定の読み込みに失敗しました';
+  }
+}
+function closeSyncModal() {
+  document.getElementById('sync-ov').classList.remove('on');
+}
+async function refreshSyncStatus() {
+  try {
+    const r = await fetch('/api/sync/config');
+    const cfg = await r.json();
+    if (cfg && !cfg.error) renderSyncStatus(cfg);
+  } catch (e) {}
+}
+document.getElementById('nav-sync').onclick = openSyncModal;
+document.getElementById('btn-sync-close').onclick = closeSyncModal;
+document.getElementById('sync-role-source').onclick = () => setSyncRole('source');
+document.getElementById('sync-role-dest').onclick = () => setSyncRole('destination');
+document.getElementById('sync-ov').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeSyncModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSyncModal();
+});
+document.getElementById('btn-sync-save').onclick = async () => {
+  const sel = document.getElementById('sync-peer');
+  const peer = sel.value;
+  const peerName = sel.selectedOptions.length ? (sel.selectedOptions[0].dataset.name || '') : '';
+  const syncTime = document.getElementById('sync-time').value;
+  if (!peer) { alert('同期相手を選択してください'); return; }
+  if (!syncTime) { alert('同期時刻を指定してください'); return; }
+  const res = await fetch('/api/sync/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({role: syncRole, peer, peer_name: peerName, sync_time: syncTime})
+  });
+  const d = await res.json();
+  if (!res.ok || !d.ok) { alert(d.error || '保存に失敗しました'); return; }
+  alert(d.peer_message || '保存しました');
+  refreshSyncStatus();
+};
+document.getElementById('btn-sync-now').onclick = async () => {
+  const b = document.getElementById('btn-sync-now');
+  b.disabled = true; b.textContent = '同期中…';
+  try {
+    const res = await fetch('/api/sync/run', {method: 'POST'});
+    const d = await res.json();
+    if (!res.ok || !d.ok) { alert(d.error || '同期に失敗しました'); }
+    else {
+      alert(d.message || '同期しました');
+      if (d.direction === 'pull') { reload(); loadMonths(); }
+    }
+    refreshSyncStatus();
+  } catch (e) {
+    alert('同期に失敗しました');
+  }
+  b.disabled = false; b.textContent = '⚡ 今すぐ同期';
+};
+document.getElementById('btn-sync-stop').onclick = async () => {
+  if (!confirm('同期を停止しますか？\n相手の指定が外れ、自動同期も行われなくなります。')) return;
+  const b = document.getElementById('btn-sync-stop');
+  b.disabled = true;
+  try {
+    const res = await fetch('/api/sync/stop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { alert(d.error || '停止に失敗しました'); }
+    else { alert(d.peer_message || '同期を停止しました'); }
+    document.getElementById('sync-peer').value = '';
+    refreshSyncStatus();
+  } catch (e) {
+    alert('停止に失敗しました');
+  }
+  b.disabled = false;
+};
+
 loadMonths();
 loadPhotos();
 refreshSidebarBackup();
@@ -5743,6 +6746,7 @@ def main() -> None:
     common.init_db()
     from . import backup
     backup.ensure_watch()
+    threading.Thread(target=sync_scheduler_loop, daemon=True).start()
     server = ThreadingHTTPServer((common.HOST, common.PORT), Handler)
     server.daemon_threads = True
 
