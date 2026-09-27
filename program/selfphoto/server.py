@@ -72,6 +72,13 @@ SYNC_CHUNK_LEN = 32 * 1024 * 1024
 SYNC_MAX_CHUNKS = 16
 SYNC_MAX_BATCH = 256 * 1024 * 1024
 SYNC_MAX_BODY = 4 * 1024 * 1024
+# pull 側が1リクエストで要求する最大チャンク数。受信側のメモリ使用量を
+# このバッチ分 (最大で SYNC_PULL_CHUNKS_PER_REQ × SYNC_CHUNK_LEN) に抑える。
+SYNC_PULL_CHUNKS_PER_REQ = 4
+# 自動同期の失敗バックオフ（秒）。last_sync が更新されない失敗が続いても
+# 30秒ごとに巨大な同期を再試行してメモリ・帯域を食い潰さないようにする。
+SYNC_FAIL_BACKOFF_SEC = 600
+_SYNC_LAST_FAIL_TS = 0.0
 SYNC_PHOTO_COLS = ["path", "filename", "captured_at", "captured_local", "year",
                    "month", "is_video", "width", "height", "camera", "size",
                    "mtime", "hash", "thumb_path", "thumb_done"]
@@ -200,11 +207,6 @@ def _http_post_json(url: str, payload, timeout: int = 300):
             return json.loads(text)
         except ValueError:
             return {}
-
-
-def _sync_bytes_hash(data: bytes) -> str:
-    import hashlib
-    return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
 def build_sync_manifest() -> dict:
@@ -355,82 +357,97 @@ def run_sync_pull(peer_url: str) -> str:
     del_paths = [p for p in local_rows if p not in src_rows]
     del_edits = [n for n in local_edits if n not in src_edits]
 
-    # --- ファイル取得（チャンク分割・バッチ取得） ---
+    # --- ファイル取得（1ファイルずつ逐次取得・検証・書き込み） ---
+    # 注意: 全ファイルを received dict に溜めてから書き込む方式は、
+    # 初回同期など大容量時にヒープがライブラリ全体分に膨張して OOM する
+    # (v1.9.0 のメモリリーク報告)。1ファイルごとに一時ファイルへ追記→
+    # ハッシュ検証→ rename することでメモリ使用量を1バッチ分に抑える。
+    # 取得済みファイルは残るため、中断後の再実行は差分のみ取得する。
     items = list(need.items())
-    received = {}  # rel -> {"parts": [(offset, bytes)], "mtime": float}
-    i = 0
-    while i < len(items):
-        chunks, total = [], 0
-        while (i < len(items) and len(chunks) < SYNC_MAX_CHUNKS
-                and total < SYNC_MAX_BATCH):
-            rel, meta = items[i]
-            try:
-                size = int(meta.get("size", 0) or 0)
-            except (TypeError, ValueError):
-                size = 0
-            off, first = 0, True
-            while off < size or (size == 0 and first):
-                ln = min(SYNC_CHUNK_LEN, size - off) if size else 0
-                chunks.append({"rel": rel, "offset": off, "length": ln})
-                total += ln
-                off += ln if ln else 1
-                first = False
-                if len(chunks) >= SYNC_MAX_CHUNKS or total >= SYNC_MAX_BATCH:
-                    break
-            i += 1
+    for rel, meta in items:
         try:
-            resp = _http_post_json(peer + "/api/sync/files", {"chunks": chunks},
-                                   timeout=300)
-        except Exception as e:
-            raise RuntimeError(f"ファイル取得に失敗しました: {e}")
-        files = resp.get("files") if isinstance(resp, dict) else None
-        if not isinstance(files, list):
-            raise ValueError("相手の応答が不正です")
-        for f in files:
-            if not isinstance(f, dict):
-                continue
-            rel = f.get("rel")
-            if rel not in need:
-                continue
-            try:
-                part = base64.b64decode(f.get("content") or "", validate=True)
-            except Exception:
-                raise ValueError(f"ファイルデータが不正です: {rel}")
-            ent = received.setdefault(rel, {"parts": [], "mtime": f.get("mtime")})
-            ent["parts"].append((int(f.get("offset") or 0), part))
-            if isinstance(f.get("mtime"), (int, float)):
-                ent["mtime"] = f["mtime"]
-    if set(received) != set(need):
-        raise ValueError("ファイル取得が不完全です")
-
-    # --- 検証・書き込み ---
-    errors = []
-    for rel, ent in received.items():
-        data = b"".join(b for _, b in sorted(ent["parts"]))
-        meta = need[rel]
+            size = int(meta.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size < 0:
+            raise ValueError(f"ファイルサイズが不正です: {rel}")
         if rel.startswith("photo/"):
-            try:
-                if _sync_bytes_hash(data) != (meta.get("hash") or ""):
-                    errors.append(f"{rel}: ハッシュ不一致")
-                    continue
-            except (TypeError, ValueError):
-                errors.append(f"{rel}: ハッシュ検証失敗")
-                continue
             dst = safe_join(common.PHOTO_DIR, rel[len("photo/"):])
-        else:
+            want_hash = meta.get("hash") or ""
+            check_hash = True
+        elif rel.startswith("edit/"):
             dst = safe_join(common.EDIT_PHOTO_DIR, rel[len("edit/"):])
+            want_hash = ""
+            check_hash = False
+        else:
+            raise ValueError(f"不正なパス: {rel}")
         if dst is None:
-            errors.append(f"{rel}: 不正なパス")
-            continue
+            raise ValueError(f"不正なパス: {rel}")
+        import hashlib
+        hasher = hashlib.blake2b(digest_size=16) if check_hash else None
+        mtime_val = None
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(data)
-            if isinstance(ent.get("mtime"), (int, float)) and ent["mtime"] > 0:
-                os.utime(dst, (time.time(), ent["mtime"]))
         except OSError as e:
-            errors.append(f"{rel}: 書き込み失敗 ({e})")
-    if errors:
-        raise RuntimeError("ファイル反映に失敗しました: " + "; ".join(errors[:5]))
+            raise RuntimeError(f"ファイル反映に失敗しました: {rel}: 書き込み失敗 ({e})")
+        tmp = dst.with_name(dst.name + ".sync-tmp")
+        try:
+            with tmp.open("wb") as out:
+                off = 0
+                first = True
+                while off < size or (size == 0 and first):
+                    first = False
+                    chunks = []
+                    while ((off < size or (size == 0 and not chunks))
+                            and len(chunks) < SYNC_PULL_CHUNKS_PER_REQ):
+                        ln = min(SYNC_CHUNK_LEN, size - off) if size else 0
+                        chunks.append({"rel": rel, "offset": off, "length": ln})
+                        off += ln if ln else 1
+                    try:
+                        resp = _http_post_json(peer + "/api/sync/files",
+                                              {"chunks": chunks}, timeout=300)
+                    except Exception as e:
+                        raise RuntimeError(f"ファイル取得に失敗しました: {e}")
+                    files = resp.get("files") if isinstance(resp, dict) else None
+                    if not isinstance(files, list) or len(files) != len(chunks):
+                        raise ValueError("相手の応答が不正です")
+                    for c, f in zip(chunks, files):
+                        if (not isinstance(f, dict) or f.get("rel") != rel
+                                or int(f.get("offset") or 0) != c["offset"]):
+                            raise ValueError(f"ファイルデータが不正です: {rel}")
+                        try:
+                            part = base64.b64decode(f.get("content") or "",
+                                                    validate=True)
+                        except Exception:
+                            raise ValueError(f"ファイルデータが不正です: {rel}")
+                        if len(part) != c["length"]:
+                            raise ValueError(f"ファイルデータが不正です: {rel}")
+                        out.write(part)
+                        if hasher is not None:
+                            hasher.update(part)
+                        if isinstance(f.get("mtime"), (int, float)):
+                            mtime_val = f["mtime"]
+                        del part
+                    del files, resp, chunks
+        except Exception:
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise
+        if hasher is not None and hasher.hexdigest() != want_hash:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise RuntimeError(f"ファイル反映に失敗しました: {rel}: ハッシュ不一致")
+        try:
+            os.replace(tmp, dst)
+            if isinstance(mtime_val, (int, float)) and mtime_val > 0:
+                os.utime(dst, (time.time(), mtime_val))
+        except OSError as e:
+            raise RuntimeError(f"ファイル反映に失敗しました: {rel}: 書き込み失敗 ({e})")
 
     # --- DB 反映 ---
     try:
@@ -565,12 +582,16 @@ def sync_scheduler_tick(now=None) -> bool:
     last = cfg.get("last_sync") or ""
     if len(last) >= 10 and last[:10] == now.date().isoformat():
         return False
+    global _SYNC_LAST_FAIL_TS
+    if time.monotonic() - _SYNC_LAST_FAIL_TS < SYNC_FAIL_BACKOFF_SEC:
+        return False
     if not _SYNC_RUN_LOCK.acquire(blocking=False):
         return False
     try:
         run_sync_pull(peer)
         return True
     except Exception as e:
+        _SYNC_LAST_FAIL_TS = time.monotonic()
         mark_sync_result(False, f"自動同期に失敗しました: {e}")
         return False
     finally:
@@ -818,7 +839,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.7.3"
+    server_version = "selfphoto/1.9.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2687,8 +2708,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(e)}, 400)
             return
         chunks = body.get("chunks") if isinstance(body, dict) else None
-        if not isinstance(chunks, list) or not chunks or len(chunks) > 64:
-            self.send_json({"ok": False, "error": "chunks required (1-64)"}, 400)
+        # 受信側は SYNC_PULL_CHUNKS_PER_REQ チャンクずつ要求する。
+        # 上限は SYNC_MAX_CHUNKS に抑え、巨大な一括要求で送信側の
+        # ヒープが膨張しないようにする。
+        if not isinstance(chunks, list) or not chunks or len(chunks) > SYNC_MAX_CHUNKS:
+            self.send_json({"ok": False, "error": "chunks required (1-16)"}, 400)
             return
         total = 0
         for c in chunks:

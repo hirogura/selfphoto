@@ -8,6 +8,9 @@ WorkingDirectory=/opt/selfphoto/program
 ExecStart=/usr/bin/python3 -m selfphoto.server
 Restart=on-failure
 RestartSec=3
+# 同期処理の不具合時にホスト全体のメモリを食い潰さないための上限。
+# v1.9.1 で同期の逐次書き込み化済みのため、通常運用はこの範囲に収まる。
+MemoryMax=1G
 
 # 待ち受けは 127.0.0.1 のみ（tailscale serve 経由で公開）
 Environment=SELFPHPHOTO_HOST=127.0.0.1
