@@ -839,7 +839,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.9.1"
+    server_version = "selfphoto/1.9.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2661,10 +2661,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 _http_post_json(peer.rstrip("/") + "/api/sync/role",
                                 {"role": opposite, "peer_url": get_self_base_url(),
-                                 "peer_name": get_self_host_name()}, timeout=15)
+                                 "peer_name": get_self_host_name(),
+                                 "sync_time": sync_time}, timeout=15)
                 peer_notified = True
-                peer_message = "相手側を「%s」に切り替えました" % (
-                    "同期先" if opposite == SYNC_ROLE_DEST else "同期元")
+                peer_message = "相手側を「%s」に切り替え、同期時刻（%s）を共有しました" % (
+                    "同期先" if opposite == SYNC_ROLE_DEST else "同期元", sync_time)
             except Exception as e:  # noqa: BLE001
                 peer_message = ("相手側への通知に失敗しました"
                                 "（相手のselfphotoを最新版に更新してください）: %s" % e)
@@ -2672,7 +2673,7 @@ class Handler(BaseHTTPRequestHandler):
                         "peer_message": peer_message})
 
     def api_sync_role(self) -> None:
-        """相手PCからの役割連動用。自分の役割を相手の反対に設定する。"""
+        """相手PCからの役割連動用。自分の役割を相手の反対に設定し、同期時刻も共有する。"""
         try:
             body = self._read_json_body()
         except ValueError as e:
@@ -2697,8 +2698,14 @@ class Handler(BaseHTTPRequestHandler):
         if peer_url:
             cfg["peer"] = peer_url
             cfg["peer_name"] = peer_name
+        # 同期時刻も共有する（旧バージョンからは送られてこないため任意扱い）。
+        # 形式が正しい場合のみ反映し、不正な値では役割の更新を妨げない。
+        sync_time = body.get("sync_time", "")
+        sync_time = sync_time.strip() if isinstance(sync_time, str) else ""
+        if valid_sync_time(sync_time):
+            cfg["sync_time"] = sync_time
         save_sync_config(cfg)
-        self.send_json({"ok": True, "role": role})
+        self.send_json({"ok": True, "role": role, "sync_time": cfg.get("sync_time", "")})
 
     def api_sync_files(self) -> None:
         """同期元がファイルチャンクを返す。{"chunks": [{rel, offset, length}]}"""
