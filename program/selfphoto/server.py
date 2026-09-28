@@ -839,7 +839,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.9.2"
+    server_version = "selfphoto/1.9.3"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -2649,10 +2649,16 @@ class Handler(BaseHTTPRequestHandler):
                             "error": "同期時刻は HH:MM 形式で指定してください"}, 400)
             return
         cfg = load_sync_config()
+        old_sync_time = cfg.get("sync_time", "")
         cfg["role"] = role
         cfg["peer"] = peer
         cfg["peer_name"] = peer_name
         cfg["sync_time"] = sync_time
+        if sync_time != old_sync_time:
+            # 同期時刻が変わったら当日の同期済みフラグをリセットし、
+            # その日のうちに即時テストできるようにする。
+            cfg["last_sync"] = ""
+            cfg["last_result"] = "同期時刻を変更したため、当日の同期済みフラグをリセットしました"
         save_sync_config(cfg)
         # 相手側の役割を反対にそろえる（相手が旧バージョン等で失敗しても保存自体は成功扱い）
         peer_notified, peer_message = False, ""
@@ -2694,6 +2700,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "invalid peer_url"}, 400)
             return
         cfg = load_sync_config()
+        old_sync_time = cfg.get("sync_time", "")
         cfg["role"] = role
         if peer_url:
             cfg["peer"] = peer_url
@@ -2704,6 +2711,11 @@ class Handler(BaseHTTPRequestHandler):
         sync_time = sync_time.strip() if isinstance(sync_time, str) else ""
         if valid_sync_time(sync_time):
             cfg["sync_time"] = sync_time
+        if valid_sync_time(sync_time) and sync_time != old_sync_time:
+            # 相手側で時刻が変わった場合も当日の同期済みフラグをリセットし、
+            # その日のうちに即時テストできるようにする。
+            cfg["last_sync"] = ""
+            cfg["last_result"] = "同期時刻を変更したため、当日の同期済みフラグをリセットしました"
         save_sync_config(cfg)
         self.send_json({"ok": True, "role": role, "sync_time": cfg.get("sync_time", "")})
 
