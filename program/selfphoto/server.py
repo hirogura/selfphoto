@@ -839,7 +839,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.9.3"
+    server_version = "selfphoto/1.9.4"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1824,6 +1824,22 @@ class Handler(BaseHTTPRequestHandler):
             tmp.write_bytes(data)
             os.replace(tmp, dst)
             conn = common.get_db()
+            # EXIF 注入は DB 更新より先に行う。注入で size/hash が変わるため、
+            # 後に stat・file_hash_of で注入後の値を登録する（stale 防止）。
+            # フォールバック日時の解決順は従来通り（src_tags → DB captured_local）。
+            prow = conn.execute(
+                "SELECT * FROM photos WHERE path=?", (rel,)).fetchone()
+            try:
+                head = dst.read_bytes()[:2]
+            except OSError:
+                head = b""
+            if head == b"\xff\xd8":
+                dt = src_tags.get("datetime")
+                if not dt and prow and prow["captured_local"]:
+                    dt = exif_mod.local_iso_to_exif(prow["captured_local"])
+                if dt:
+                    exif_mod.inject_exif_into_jpeg(
+                        dst, dt, src_tags.get("make"), src_tags.get("model"))
             try:
                 size = exif_mod.image_size(dst)
             except Exception:
@@ -1847,19 +1863,6 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if row:
                 ingest.make_thumbnail(row)
-            # JPEG 出力なら EXIF（撮影日時・メーカー・モデル）を引き継ぐ。
-            # captured_at（DB）は不変なので並び順も変わらない。
-            try:
-                head = dst.read_bytes()[:2]
-            except OSError:
-                head = b""
-            if head == b"\xff\xd8":
-                dt = src_tags.get("datetime")
-                if not dt and row and row["captured_local"]:
-                    dt = exif_mod.local_iso_to_exif(row["captured_local"])
-                if dt:
-                    exif_mod.inject_exif_into_jpeg(
-                        dst, dt, src_tags.get("make"), src_tags.get("model"))
             # 古いビューア用プレビューは消す（次回表示時に遅延生成される）
             stale_view = safe_join(
                 common.VIEW_DIR, Path(rel).with_suffix("").as_posix() + "_view.webp")

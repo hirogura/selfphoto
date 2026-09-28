@@ -94,7 +94,9 @@ def scan_data_dir(max_workers: int = 8, progress=None) -> dict:
     """
     common.init_db()
     conn = common.get_db()
-    known = {r["path"] for r in conn.execute("SELECT path FROM photos")}
+    db_sizes = {r["path"]: r["size"]
+                for r in conn.execute("SELECT path, size FROM photos")}
+    known = set(db_sizes)
     common.PHOTO_DIR.mkdir(parents=True, exist_ok=True)
     files = [
         p for p in common.PHOTO_DIR.rglob("*")
@@ -113,25 +115,79 @@ def scan_data_dir(max_workers: int = 8, progress=None) -> dict:
         except OSError:
             return p, None
 
-    added = 0
-    # 重いハッシュ計算だけ並列化し、DB 登録はメインスレッドで行う
+    def _rel_of(p: Path) -> str | None:
+        try:
+            return p.relative_to(common.PHOTO_DIR).as_posix()
+        except ValueError:
+            return None
+
+    # size 不一致の既存行と新規行だけハッシュ計算する（全量ハッシュは重いため）。
+    # size 一致の行はハッシュ再計算しない。
+    to_hash: list[Path] = []
+    for p in files:
+        rel = _rel_of(p)
+        if rel is None or rel not in db_sizes:
+            to_hash.append(p)
+            continue
+        try:
+            if p.stat().st_size != db_sizes[rel]:
+                to_hash.append(p)
+        except OSError:
+            to_hash.append(p)
+
+    hashes: dict[Path, str] = {}
+    failed = 0
+    # 重いハッシュ計算だけ並列化し、DB 登録・修復はメインスレッドで行う
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for i, (p, h) in enumerate(pool.map(hash_one, files), 1):
-            if h is not None and register_file(p, conn, file_hash=h):
-                added += 1
-            if progress is not None:
+        for p, h in pool.map(hash_one, to_hash):
+            if h is None:
+                failed += 1
+                rel = _rel_of(p)
+                print(f"HASH-FAIL: {rel if rel is not None else p}")
+            else:
+                hashes[p] = h
+
+    added = 0
+    repaired = 0
+    for i, p in enumerate(files, 1):
+        rel = _rel_of(p)
+        if rel is not None:
+            if rel not in db_sizes:
+                h = hashes.get(p)
+                if h is not None and register_file(p, conn, file_hash=h):
+                    added += 1
+            else:
                 try:
-                    progress(i, total, p.name)
-                except Exception:
+                    st = p.stat()
+                except OSError:
+                    # ハッシュ失敗として上で件数・出力済み（二重カウントしない）
                     pass
+                else:
+                    if st.st_size != db_sizes[rel]:
+                        h = hashes.get(p)
+                        if h is not None:
+                            conn.execute(
+                                """UPDATE photos SET size=?, mtime=?, hash=?
+                                   WHERE path=?""",
+                                (st.st_size, st.st_mtime, h, rel),
+                            )
+                            repaired += 1
+                        # h is None の場合は上で HASH-FAIL 出力・カウント済み
+        if progress is not None:
+            try:
+                progress(i, total, p.name)
+            except Exception:
+                pass
     # 消えたファイルを DB からも削除
     on_disk = {p.relative_to(common.PHOTO_DIR).as_posix() for p in files}
     gone = known - on_disk
     for rel in gone:
         conn.execute("DELETE FROM photos WHERE path=?", (rel,))
     conn.commit()
-    print(f"scan: {len(files)} files, {added} new, {len(gone)} removed")
-    return {"total": len(files), "added": added, "removed": len(gone)}
+    print(f"scan: {len(files)} files, {added} new, {repaired} repaired, "
+          f"{len(gone)} removed, {failed} hash-failed")
+    return {"total": len(files), "added": added, "removed": len(gone),
+            "repaired": repaired, "failed": failed}
 
 
 def thumb_rel_path(rel: str, base: str) -> str:
