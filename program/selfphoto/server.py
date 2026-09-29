@@ -546,7 +546,29 @@ def run_sync_pull(peer_url: str) -> str:
     except OSError:
         pass
     mark_sync_result(True, f"同期しました（受信・{exported_at}）")
+    _notify_sync_source(peer, exported_at, True, "")
     return exported_at
+
+
+def _notify_sync_source(source_url: str, exported_at: str = "",
+                        ok: bool = True, message: str = "") -> None:
+    """同期先から同期元へ結果を通知し、同期元の表示を更新する。
+
+    pull 型同期のため、同期が成功しても同期元の sync_config.json は
+    更新されない（＝同期元の表示に反映されない）。成功・失敗いずれも
+    同期元に通知し、同期元側で last_sync / last_result を更新する。
+    通知に失敗しても同期自体は成功扱いにする（相手がオフライン等）。
+    """
+    try:
+        if not is_valid_peer_url(source_url):
+            return
+        _http_post_json(source_url.rstrip("/") + "/api/sync/done",
+                        {"exported_at": exported_at or "",
+                         "ok": bool(ok),
+                         "message": str(message or "")[:300],
+                         "peer_url": get_self_base_url()}, timeout=15)
+    except Exception:
+        pass
 
 
 def trigger_remote_pull(peer_url: str) -> None:
@@ -564,6 +586,7 @@ def _bg_sync_pull(peer_url: str) -> None:
         run_sync_pull(peer_url)
     except Exception as e:
         mark_sync_result(False, f"同期に失敗しました: {e}")
+        _notify_sync_source(peer_url, "", False, str(e))
 
 
 def sync_scheduler_tick(now=None) -> bool:
@@ -593,6 +616,7 @@ def sync_scheduler_tick(now=None) -> bool:
     except Exception as e:
         _SYNC_LAST_FAIL_TS = time.monotonic()
         mark_sync_result(False, f"自動同期に失敗しました: {e}")
+        _notify_sync_source(peer, "", False, str(e))
         return False
     finally:
         try:
@@ -839,7 +863,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.9.4"
+    server_version = "selfphoto/1.9.5"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -980,6 +1004,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_sync_run()
             elif path == "/api/sync/trigger":
                 self.api_sync_trigger()
+            elif path == "/api/sync/done":
+                self.api_sync_done()
             elif path == "/api/sync/stop":
                 self.api_sync_stop()
             elif path == "/api/sync/unlink":
@@ -2791,6 +2817,7 @@ class Handler(BaseHTTPRequestHandler):
                     exported_at = run_sync_pull(peer)
                 except (ValueError, RuntimeError) as e:
                     mark_sync_result(False, f"手動同期に失敗しました: {e}")
+                    _notify_sync_source(peer, "", False, str(e))
                     self.send_json({"ok": False, "error": str(e)}, 500)
                     return
                 self.send_json({"ok": True, "direction": "pull",
@@ -2803,6 +2830,12 @@ class Handler(BaseHTTPRequestHandler):
                     mark_sync_result(False, f"手動同期に失敗しました: {e}")
                     self.send_json({"ok": False, "error": str(e)}, 500)
                     return
+                # 指示を送った時点で同期元の表示も更新する。
+                # pull 完了・失敗時は同期先からの /api/sync/done 通知で
+                # 「送信」結果に上書きされる。
+                mark_sync_result(
+                    True, "相手側で同期を開始しました。"
+                          "完了後に送信結果に更新されます")
                 self.send_json({"ok": True, "direction": "trigger",
                                 "message": "相手側で同期を開始しました。"
                                            "完了は相手側の同期状態で確認してください"})
@@ -2867,6 +2900,43 @@ class Handler(BaseHTTPRequestHandler):
                                 f"相手側でも停止してください）: {e}")
         self.send_json({"ok": True, "peer_notified": peer_notified,
                         "peer_message": peer_message})
+
+    def api_sync_done(self) -> None:
+        """同期先からの完了通知で同期元の表示を更新する。
+
+        pull 型同期のため同期先だけで mark_sync_result すると同期元の
+        sync_config.json が更新されず、同期元の表示に反映されない。
+        同期先は run_sync_pull の成功・失敗後にここへ通知する。
+        """
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if not isinstance(body, dict):
+            self.send_json({"ok": False, "error": "bad request"}, 400)
+            return
+        peer_url = body.get("peer_url", "")
+        peer_url = peer_url.strip().rstrip("/") if isinstance(peer_url, str) else ""
+        cfg = load_sync_config()
+        expected = (cfg.get("peer") or "").strip().rstrip("/")
+        if expected and peer_url and expected != peer_url:
+            self.send_json({"ok": False, "error": "peer mismatch"}, 403)
+            return
+        exported_at = body.get("exported_at", "")
+        exported_at = exported_at.strip() if isinstance(exported_at, str) else ""
+        ok = bool(body.get("ok", True))
+        message = body.get("message", "")
+        message = str(message or "")[:300]
+        if ok:
+            mark_sync_result(
+                True, f"同期しました（送信・{exported_at}）" if exported_at
+                else "同期しました（送信）")
+        else:
+            mark_sync_result(
+                False, f"同期（送信）に失敗しました: {message}" if message
+                else "同期（送信）に失敗しました")
+        self.send_json({"ok": True})
 
     def api_sync_unlink(self) -> None:
         """相手PCからの停止連動用。相手が同期を停止したら自分の相手指定も外す。"""
