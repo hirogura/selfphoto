@@ -85,6 +85,7 @@ SYNC_PHOTO_COLS = ["path", "filename", "captured_at", "captured_local", "year",
 DEFAULT_SYNC_CONFIG = {
     "role": SYNC_ROLE_SOURCE, "peer": "", "peer_name": "",
     "sync_time": "03:00", "last_sync": "", "last_result": "",
+    "last_result_at": "",
 }
 _SYNC_RUN_LOCK = threading.Lock()
 
@@ -273,12 +274,23 @@ def _sync_view_path(rel: str):
 def mark_sync_result(ok: bool, message) -> None:
     try:
         cfg = load_sync_config()
+        now = datetime.now().isoformat(timespec="seconds")
         if ok:
-            cfg["last_sync"] = datetime.now().isoformat(timespec="seconds")
+            cfg["last_sync"] = now
         cfg["last_result"] = str(message or "")[:300]
+        cfg["last_result_at"] = now
         save_sync_config(cfg)
     except Exception:
         pass
+
+
+def set_sync_notice(cfg: dict, message: str, reset_sync: bool = False) -> None:
+    """同期結果以外の通知（停止・時刻変更等）を時刻付きで記録する。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    if reset_sync:
+        cfg["last_sync"] = ""
+    cfg["last_result"] = str(message or "")[:300]
+    cfg["last_result_at"] = now
 
 
 def run_sync_pull(peer_url: str) -> str:
@@ -863,7 +875,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/1.9.5"
+    server_version = "selfphoto/2.0.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1128,6 +1140,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_sync_config()
             cfg["self_url"] = get_self_base_url()
             cfg["self_name"] = get_self_host_name()
+            cfg["running"] = _SYNC_RUN_LOCK.locked()
             self.send_json(cfg)
         elif path == "/api/sync/peers":
             self.send_json({"peers": get_sync_peer_list(),
@@ -2686,8 +2699,9 @@ class Handler(BaseHTTPRequestHandler):
         if sync_time != old_sync_time:
             # 同期時刻が変わったら当日の同期済みフラグをリセットし、
             # その日のうちに即時テストできるようにする。
-            cfg["last_sync"] = ""
-            cfg["last_result"] = "同期時刻を変更したため、当日の同期済みフラグをリセットしました"
+            set_sync_notice(
+                cfg, "同期時刻を変更したため、当日の同期済みフラグをリセットしました",
+                reset_sync=True)
         save_sync_config(cfg)
         # 相手側の役割を反対にそろえる（相手が旧バージョン等で失敗しても保存自体は成功扱い）
         peer_notified, peer_message = False, ""
@@ -2743,8 +2757,9 @@ class Handler(BaseHTTPRequestHandler):
         if valid_sync_time(sync_time) and sync_time != old_sync_time:
             # 相手側で時刻が変わった場合も当日の同期済みフラグをリセットし、
             # その日のうちに即時テストできるようにする。
-            cfg["last_sync"] = ""
-            cfg["last_result"] = "同期時刻を変更したため、当日の同期済みフラグをリセットしました"
+            set_sync_notice(
+                cfg, "同期時刻を変更したため、当日の同期済みフラグをリセットしました",
+                reset_sync=True)
         save_sync_config(cfg)
         self.send_json({"ok": True, "role": role, "sync_time": cfg.get("sync_time", "")})
 
@@ -2882,8 +2897,8 @@ class Handler(BaseHTTPRequestHandler):
         old_peer = (cfg.get("peer") or "").strip()
         cfg["peer"] = ""
         cfg["peer_name"] = ""
-        cfg["last_result"] = (
-            f"同期を停止しました（{datetime.now().isoformat(timespec='seconds')}）")
+        set_sync_notice(
+            cfg, f"同期を停止しました（{datetime.now().isoformat(timespec='seconds')}）")
         save_sync_config(cfg)
         peer_notified, peer_message = False, ""
         if old_peer and (body or {}).get("notify_peer", True):
@@ -2955,7 +2970,7 @@ class Handler(BaseHTTPRequestHandler):
         if peer_url and (cfg.get("peer") or "").rstrip("/") == peer_url:
             cfg["peer"] = ""
             cfg["peer_name"] = ""
-            cfg["last_result"] = "相手側で同期が停止されたため、相手指定を解除しました"
+            set_sync_notice(cfg, "相手側で同期が停止されたため、相手指定を解除しました")
             save_sync_config(cfg)
             unlinked = True
         self.send_json({"ok": True, "unlinked": unlinked})
@@ -3121,20 +3136,20 @@ body.modal-open { overflow: hidden; }
 #sidebar .foot {
   margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px;
 }
-#side-backup {
+#side-backup, #side-sync {
   display: flex; flex-direction: column; gap: 2px;
   padding: 0 2px 8px; font-size: 11px; color: var(--muted); line-height: 1.5;
   cursor: pointer;
 }
-#side-backup .sb-row {
+#side-backup .sb-row, #side-sync .sb-row {
   display: flex; align-items: center; gap: 5px;
   white-space: nowrap; overflow: hidden;
 }
-#side-backup .dot { width: 7px; height: 7px; border-radius: 50%; background: #555; flex: none; }
-#side-backup .dot.on { background: #7ee2a8; }
-#side-backup .dot.run { background: var(--accent); }
-#side-backup .dot.ok { background: #7ee2a8; }
-#side-backup .dot.ng { background: #ff9a9a; }
+#side-backup .dot, #side-sync .dot { width: 7px; height: 7px; border-radius: 50%; background: #555; flex: none; }
+#side-backup .dot.on, #side-sync .dot.on { background: #7ee2a8; }
+#side-backup .dot.run, #side-sync .dot.run { background: var(--accent); }
+#side-backup .dot.ok, #side-sync .dot.ok { background: #7ee2a8; }
+#side-backup .dot.ng, #side-sync .dot.ng { background: #ff9a9a; }
 
 /* ---------------- main (header-less timeline) ---------------- */
 main { padding: 0 8px 80px 228px; }
@@ -3573,6 +3588,10 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
   </nav>
   <div class="foot">
+    <div id="side-sync" title="同期の状態（クリックで同期設定へ）">
+      <div class="sb-row"><span class="dot" id="side-sync-dot"></span><span id="side-sync-state">同期: -</span></div>
+      <div class="sb-row"><span id="side-sync-last">前回: -</span></div>
+    </div>
     <div id="side-backup" title="バックアップの状態（クリックでバックアップ画面へ）">
       <div class="sb-row"><span class="dot" id="side-bk-dot"></span><span id="side-bk-watch">監視: -</span></div>
       <div class="sb-row"><span id="side-bk-last">前回: -</span></div>
@@ -4295,6 +4314,41 @@ async function refreshSidebarBackup() {
     return;
   }
   updateSidebarBackup(st);
+}
+
+// ---------------- sidebar sync status ----------------
+function updateSidebarSync(cfg) {
+  const sEl = document.getElementById('side-sync-state');
+  const lEl = document.getElementById('side-sync-last');
+  const dot = document.getElementById('side-sync-dot');
+  if (!sEl || !lEl || !cfg) return;
+  const on = !!((cfg.peer || '').trim());
+  const running = !!cfg.running;
+  sEl.textContent = '同期: ' + (running ? '同期中' : (on ? 'ON' : 'OFF'));
+  const res = cfg.last_result || '';
+  const ts = cfg.last_result_at || cfg.last_sync || '';
+  let dateTxt = '';
+  if (ts) {
+    const d = new Date(ts);
+    if (!isNaN(d)) dateTxt = ' ' + d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  let label;
+  if (!res) label = '前回: 未実行';
+  else if (/失敗/.test(res)) label = '前回: 失敗' + dateTxt;
+  else if (/同期しました/.test(res)) label = '前回: 成功' + dateTxt;
+  else if (/開始しました/.test(res)) label = '前回: 開始' + dateTxt;
+  else label = '前回: ' + res.slice(0, 18) + dateTxt;
+  lEl.textContent = label;
+  if (dot) dot.className = 'dot ' + (running ? 'run' : (/失敗/.test(res) ? 'ng' : (/同期しました/.test(res) ? 'ok' : (on ? 'on' : ''))));
+}
+async function refreshSidebarSync() {
+  let cfg;
+  try {
+    cfg = await (await fetch('/api/sync/config')).json();
+  } catch (err) {
+    return;
+  }
+  if (cfg && !cfg.error) updateSidebarSync(cfg);
 }
 
 async function loadPhotos() {
@@ -6780,10 +6834,14 @@ async function refreshSyncStatus() {
   try {
     const r = await fetch('/api/sync/config');
     const cfg = await r.json();
-    if (cfg && !cfg.error) renderSyncStatus(cfg);
+    if (cfg && !cfg.error) {
+      renderSyncStatus(cfg);
+      updateSidebarSync(cfg);
+    }
   } catch (e) {}
 }
 document.getElementById('nav-sync').onclick = openSyncModal;
+document.getElementById('side-sync').onclick = openSyncModal;
 document.getElementById('btn-sync-close').onclick = closeSyncModal;
 document.getElementById('sync-role-source').onclick = () => setSyncRole('source');
 document.getElementById('sync-role-dest').onclick = () => setSyncRole('destination');
@@ -6848,7 +6906,8 @@ document.getElementById('btn-sync-stop').onclick = async () => {
 loadMonths();
 loadPhotos();
 refreshSidebarBackup();
-setInterval(refreshSidebarBackup, 15000);
+refreshSidebarSync();
+setInterval(() => { refreshSidebarBackup(); refreshSidebarSync(); }, 15000);
 </script>
 </body>
 </html>
