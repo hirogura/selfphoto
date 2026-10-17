@@ -875,7 +875,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.0.0"
+    server_version = "selfphoto/2.1.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4830,10 +4830,14 @@ document.getElementById('update-btn').addEventListener('click', async () => {
   alert('サーバの復帰を確認できませんでした。時間をおいて再読み込みしてください。');
 });
 
-document.getElementById('nav-delete').addEventListener('click', async () => {
-  const sel = state.photos.filter(p => state.selected.has(p.path));
+document.getElementById('nav-delete').addEventListener('click', () =>
+  deletePhotos(state.photos.filter(p => state.selected.has(p.path))));
+
+// 写真（複数可）をまとめて削除する。サイドバーの削除と右クリックの削除で共通。
+async function deletePhotos(sel) {
   if (!sel.length) { alert('削除する写真を選択してください'); return; }
-  if (!confirm(`${sel.length}件を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
+  const title = sel.length === 1 ? `「${sel[0].filename}」` : `${sel.length}件`;
+  if (!confirm(`${title}を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
   const paths = sel.map(p => p.path);
   let j = null;
   try {
@@ -4847,29 +4851,31 @@ document.getElementById('nav-delete').addEventListener('click', async () => {
     alert('削除に失敗しました（通信エラー）');
     return;
   }
-  if (!j || !j.ok) {
-    alert('削除に失敗しました: ' + ((j && j.error) || 'unknown error'));
+  const gone = new Set((j && j.deleted) || []);
+  if (!gone.size) {
+    const detail = (j && (j.error || (j.errors && j.errors[0] && j.errors[0].error))) || 'unknown error';
+    alert('削除に失敗しました: ' + detail);
     return;
   }
-  const gone = new Set(j.deleted || []);
-  if (gone.size) {
-    state.photos = state.photos.filter(p => !gone.has(p.path));
-    state.selected = new Set([...state.selected].filter(p => !gone.has(p)));
-    // 写真が残っていないフォルダ・月の明示チェックは外す
-    state.folderSel = new Set([...state.folderSel].filter(f =>
-      state.photos.some(p => p.path.startsWith(f + '/'))));
-    state.monthSel = new Set([...state.monthSel].filter(m =>
-      state.photos.some(p => p.path.startsWith(m))));
-    render();
-    loadMonths();
-  }
+  state.photos = state.photos.filter(p => !gone.has(p.path));
+  state.selected = new Set([...state.selected].filter(p => !gone.has(p)));
+  // 写真が残っていないフォルダ・月の明示チェックは外す
+  state.folderSel = new Set([...state.folderSel].filter(f =>
+    state.photos.some(p => p.path.startsWith(f + '/'))));
+  state.monthSel = new Set([...state.monthSel].filter(m =>
+    state.photos.some(p => p.path.startsWith(m))));
+  render();
+  loadMonths();
   if (j.errors && j.errors.length) {
     alert(`${gone.size}件を削除しました。${j.errors.length}件は失敗しました`);
   }
-});
+}
 
-document.getElementById('nav-download').addEventListener('click', async () => {
-  const sel = state.photos.filter(p => state.selected.has(p.path));
+document.getElementById('nav-download').addEventListener('click', () =>
+  downloadPhotos(state.photos.filter(p => state.selected.has(p.path))));
+
+// 写真（複数可）をまとめてダウンロードする。サイドバーのダウンロードと右クリックのダウンロードで共通。
+async function downloadPhotos(sel) {
   if (!sel.length) { alert('ダウンロードする写真を選択してください'); return; }
   // 日付フォルダごとにグループ化（フォルダ見出しを明示チェックした場合のみ zip、
   // ファイル個別チェックだけの場合は全ファイルでも 1 枚ずつ）
@@ -4894,7 +4900,7 @@ document.getElementById('nav-download').addEventListener('click', async () => {
       }
     }
   }
-});
+}
 
 async function downloadUrl(url, filename) {
   const r = await fetch(url);
@@ -4918,11 +4924,22 @@ async function downloadUrl(url, filename) {
 // サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・ダウンロード・削除）。
 // 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
 // コピーは元画像をクリップボードへ書き込む（拡大画面の「コピー」と同じ処理）。
+// 複数選択モードで右クリックした写真が選択中なら、回転・ダウンロード・削除は
+// 選択中の写真すべてを対象にする（コピー・編集は従来どおり 1 枚のみ）。
 let ctxPhoto = null;
 const ctxMenu = document.getElementById('ctx-menu');
 function hideCtxMenu() {
   if (ctxMenu) ctxMenu.classList.remove('on');
   ctxPhoto = null;
+}
+// 右クリックメニューの対象写真を返す（複数選択中は選択中の写真すべて）。
+function ctxTargets(p) {
+  if (!p) return [];
+  if (state.selecting && state.selected.has(p.path)) {
+    const sel = state.photos.filter(x => state.selected.has(x.path));
+    if (sel.length) return sel;
+  }
+  return [p];
 }
 function showCtxMenu(x, y, p) {
   if (!ctxMenu) return;
@@ -4951,11 +4968,16 @@ if (ctxMenu) {
         return;
       }
       hideCtxMenu();
-      if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhoto(p, act === 'rot-l' ? 'left' : 'right');
+      const targets = ctxTargets(p);
+      if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhotos(targets, act === 'rot-l' ? 'left' : 'right');
       else if (act === 'copy') await copyCtxPhoto(p);
       else if (act === 'edit') openEditorForPhoto(p);
-      else if (act === 'dl') await downloadUrl(p.original, p.filename);
-      else if (act === 'del') await deleteThumbPhoto(p);
+      else if (act === 'dl') {
+        // 1 枚だけなら従来どおりその写真のみ、複数選択時はサイドバーと同じ一括ダウンロード
+        if (targets.length > 1) await downloadPhotos(targets);
+        else await downloadUrl(p.original, p.filename);
+      }
+      else if (act === 'del') await deletePhotos(targets);
     });
   });
 }
@@ -4964,58 +4986,37 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
 window.addEventListener('scroll', () => hideCtxMenu(), { passive: true });
-async function rotateThumbPhoto(p, dir) {
-  if (p.isVideo) { alert('動画の回転には対応していません'); return; }
-  let j = null;
-  try {
-    const r = await fetch('/api/rotate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: p.path, dir }),
-    });
-    j = await r.json();
-  } catch (err) {
-    alert('回転に失敗しました（通信エラー）');
-    return;
+async function rotateThumbPhotos(list, dir) {
+  const photos = list.filter(p => !p.isVideo);
+  const skipped = list.length - photos.length;
+  if (!photos.length) { alert('動画の回転には対応していません'); return; }
+  const failed = [];
+  for (const p of photos) {
+    let j = null;
+    try {
+      const r = await fetch('/api/rotate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p.path, dir }),
+      });
+      j = await r.json();
+    } catch (err) {
+      failed.push(p.filename);
+      continue;
+    }
+    if (!j || !j.ok) { failed.push(p.filename); continue; }
+    // 一覧の表示を最新化する（サムネイル・縦横比・キャッシュバスター）
+    if (j.width && j.height) { p.width = j.width; p.height = j.height; }
+    if (j.size) p.size = j.size;
+    if (j.thumb) p.thumb = j.thumb;
+    if (j.view) p.view = j.view;
+    if (j.original) p.original = j.original;
+    if (j.filename) p.filename = j.filename;
   }
-  if (!j || !j.ok) {
-    alert('回転に失敗しました: ' + ((j && j.error) || 'unknown error'));
-    return;
-  }
-  // 一覧の表示を最新化する（サムネイル・縦横比・キャッシュバスター）
-  if (j.width && j.height) { p.width = j.width; p.height = j.height; }
-  if (j.size) p.size = j.size;
-  if (j.thumb) p.thumb = j.thumb;
-  if (j.view) p.view = j.view;
-  if (j.original) p.original = j.original;
-  if (j.filename) p.filename = j.filename;
   render();
-}
-async function deleteThumbPhoto(p) {
-  if (!confirm(`「${p.filename}」を削除しますか？\n（一覧・ファイル実体・サムネイルから削除されます。元に戻せません）`)) return;
-  let j = null;
-  try {
-    const r = await fetch('/api/delete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: [p.path] }),
-    });
-    j = await r.json();
-  } catch (err) {
-    alert('削除に失敗しました（通信エラー）');
-    return;
-  }
-  if (!j || !j.ok || !((j.deleted || []).includes(p.path))) {
-    alert('削除に失敗しました: ' + ((j && j.error) || 'unknown error'));
-    return;
-  }
-  state.photos = state.photos.filter(x => x.path !== p.path);
-  state.selected.delete(p.path);
-  const seg = p.path.split('/');
-  const folder = seg.length >= 3 ? seg.slice(0, 3).join('/') : '';
-  const monthPrefix = seg.length >= 2 ? seg.slice(0, 2).join('/') + '/' : '';
-  if (folder && !state.photos.some(x => x.path.startsWith(folder + '/'))) state.folderSel.delete(folder);
-  if (monthPrefix && !state.photos.some(x => x.path.startsWith(monthPrefix))) state.monthSel.delete(monthPrefix);
-  render();
-  loadMonths();
+  const notes = [];
+  if (skipped) notes.push(`動画 ${skipped} 件は回転の対象外です`);
+  if (failed.length) notes.push(`回転に失敗しました（${failed.length} 件）: ${failed.join(', ')}`);
+  if (notes.length) alert(notes.join('\n'));
 }
 function openEditorForPhoto(p) {
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
