@@ -875,7 +875,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.1.0"
+    server_version = "selfphoto/2.2.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4969,7 +4969,14 @@ if (ctxMenu) {
       }
       hideCtxMenu();
       const targets = ctxTargets(p);
-      if (act === 'rot-l' || act === 'rot-r') await rotateThumbPhotos(targets, act === 'rot-l' ? 'left' : 'right');
+      if (act === 'rot-l' || act === 'rot-r') {
+        await rotateThumbPhotos(targets, act === 'rot-l' ? 'left' : 'right');
+        // ビューアで表示中の写真を回した場合は表示を最新化する
+        if (lb.classList.contains('open')) {
+          const cur = state.photos[lbIndex];
+          if (cur && targets.some(t => t.path === cur.path)) showLb();
+        }
+      }
       else if (act === 'copy') await copyCtxPhoto(p);
       else if (act === 'edit') openEditorForPhoto(p);
       else if (act === 'dl') {
@@ -4977,7 +4984,24 @@ if (ctxMenu) {
         if (targets.length > 1) await downloadPhotos(targets);
         else await downloadUrl(p.original, p.filename);
       }
-      else if (act === 'del') await deletePhotos(targets);
+      else if (act === 'del') {
+        // ビューア表示中なら削除後に表示を整える（ビューアの削除ボタンと同じ挙動）
+        const lbOpen = lb.classList.contains('open');
+        const curPath = lbOpen && state.photos[lbIndex] ? state.photos[lbIndex].path : null;
+        await deletePhotos(targets);
+        if (lbOpen) {
+          if (curPath && state.photos.some(x => x.path === curPath)) {
+            lbIndex = state.photos.findIndex(x => x.path === curPath);
+            showLb();
+          } else if (!state.photos.length) {
+            document.getElementById('lb-close').click();
+          } else {
+            if (lbIndex >= state.photos.length) lbIndex = state.photos.length - 1;
+            if (lbIndex < 0) lbIndex = 0;
+            showLb();
+          }
+        }
+      }
     });
   });
 }
@@ -5118,6 +5142,8 @@ function openLb(p) {
 function showLb() {
   const p = state.photos[lbIndex];
   if (!p) return;
+  // 写真を替えたら右クリックメニューは閉じる
+  hideCtxMenu();
   lb.classList.add('open');
   syncBodyScroll();
   lbContent.innerHTML = '';
@@ -5248,7 +5274,7 @@ function moveLb(delta) {
   lbIndex = (lbIndex + delta + state.photos.length) % state.photos.length;
   showLb();
 }
-document.getElementById('lb-close').onclick = () => { lb.classList.remove('open'); lbContent.innerHTML = ''; syncBodyScroll(); };
+document.getElementById('lb-close').onclick = () => { hideCtxMenu(); lb.classList.remove('open'); lbContent.innerHTML = ''; syncBodyScroll(); };
 document.getElementById('lb-dl').onclick = async () => {
   const p = state.photos[lbIndex];
   if (!p) return;
@@ -5303,6 +5329,8 @@ document.getElementById('lb-prev').onclick = (e) => { e.stopPropagation(); moveL
 document.getElementById('lb-next').onclick = (e) => { e.stopPropagation(); moveLb(1); };
 document.addEventListener('keydown', e => {
   if (!lb.classList.contains('open')) return;
+  // 右クリックメニュー表示中はメニュー側の Escape 処理（メニューを閉じる）に任せる
+  if (ctxMenu && ctxMenu.classList.contains('on')) return;
   if (e.key === 'Escape') document.getElementById('lb-close').click();
   if (e.key === 'ArrowLeft') moveLb(-1);
   if (e.key === 'ArrowRight') moveLb(1);
@@ -5310,6 +5338,15 @@ document.addEventListener('keydown', e => {
   if (e.key === '-') stepLbZoom(-1);
 });
 lb.addEventListener('click', e => { if (e.target === lb) document.getElementById('lb-close').click(); });
+// ビューア表示中の写真でも一覧と同じ右クリックメニューを出す。
+// 対象は表示中の写真 1 枚（複数選択モードで選択中なら一覧と同じく選択全体が対象）。
+lbContent.addEventListener('contextmenu', e => {
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  e.preventDefault();
+  e.stopPropagation();
+  showCtxMenu(e.clientX, e.clientY, p);
+});
 
 // ---------------- editor ----------------
 // 画像編集（トリミング / モザイク / ぼかし / リサイズ）。Canvas で加工し、
