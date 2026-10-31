@@ -875,7 +875,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.3.0"
+    server_version = "selfphoto/2.4.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3422,6 +3422,13 @@ main { padding: 0 8px 80px 228px; }
 #editor .ed-canvas-wrap.zoomed { display: block; }
 #editor .ed-canvas-wrap.zoomed #ed-canvas { display: block; margin: 0 auto; max-width: none; max-height: none; }
 #ed-canvas { max-width: 100%; max-height: 100%; touch-action: none; cursor: crosshair; }
+/* 元画像比較（チェック中は編集キャンバスの代わりに元画像を重ねて表示） */
+#ed-original { display: none; max-width: 100%; max-height: 100%; }
+#editor.comparing #ed-canvas { display: none !important; }
+#editor.comparing #ed-original { display: block; }
+#editor.comparing #ed-cropbox { visibility: hidden; }
+#editor .ed-canvas-wrap.zoomed #ed-original { display: none; max-width: none; max-height: none; }
+#editor.comparing .ed-canvas-wrap.zoomed #ed-original { display: block; margin: 0 auto; }
 #ed-cropbox {
   position: absolute; display: none; z-index: 2; pointer-events: none;
   border: 2px dashed var(--accent); background: rgba(76,141,255,.12);
@@ -3477,6 +3484,11 @@ main { padding: 0 8px 80px 228px; }
   padding: 9px 16px; font-size: 13px; cursor: pointer;
 }
 #editor .ed-savebar button:hover { background: #33363c; }
+#editor .ed-savebar label {
+  display: flex; align-items: center; gap: 5px; color: var(--fg);
+  font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap;
+}
+#editor .ed-savebar label input { accent-color: var(--accent); cursor: pointer; }
 #ed-overwrite { background: #1d3a24 !important; }
 #ed-tolibrary { background: #1d2f4a !important; }
 /* ---------------- sidebar selection buttons ---------------- */
@@ -3738,7 +3750,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 <div id="editor">
   <div class="ed-head"><span id="ed-title"></span></div>
   <div class="ed-main">
-    <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><div id="ed-cropbox"><span class="cb-h nw"></span><span class="cb-h ne"></span><span class="cb-h sw"></span><span class="cb-h se"></span><span class="cb-h n"></span><span class="cb-h s"></span><span class="cb-h w"></span><span class="cb-h e"></span></div></div>
+    <div class="ed-canvas-wrap" id="ed-wrap"><canvas id="ed-canvas"></canvas><img id="ed-original" alt=""><div id="ed-cropbox"><span class="cb-h nw"></span><span class="cb-h ne"></span><span class="cb-h sw"></span><span class="cb-h se"></span><span class="cb-h n"></span><span class="cb-h s"></span><span class="cb-h w"></span><span class="cb-h e"></span></div></div>
     <div class="ed-side">
       <button data-tool="hand">手のひら</button>
       <div class="ed-panel" id="ed-panel-hand">
@@ -3835,6 +3847,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     </div>
   </div>
   <div class="ed-savebar">
+    <label id="ed-compare-label"><input type="checkbox" id="ed-compare">元画像と比較する</label>
     <button id="ed-overwrite">上書き保存</button>
     <button id="ed-saveas">別名保存</button>
     <button id="ed-tolibrary">編集フォルダに保存</button>
@@ -5472,6 +5485,18 @@ const ed = { tool: null, path: '', filename: '', dirty: false, cropRect: null, c
   lineWidths: [4, 8, 16, 32, 64],
   adjust: null, adjustBaseData: null };
 
+// ---------------- 元画像比較 ----------------
+// 「上書き保存」の左のチェックボックス。チェック中は編集キャンバスの代わりに
+// 編集開始時の元画像（オーバーレイの <img>）を表示する。
+const edCompareChk = document.getElementById('ed-compare');
+const edOriginal = document.getElementById('ed-original');
+edCompareChk.onchange = () => {
+  const on = edCompareChk.checked;
+  // ズーム中の基準幅が未計算なら、チェック時点（キャンバス表示中）に取っておく
+  if (on && !edBaseW) edBaseW = Math.round(edCanvas.clientWidth || edCanvas.width);
+  document.getElementById('editor').classList.toggle('comparing', on);
+};
+
 function openEditor() {
   const p = state.photos[lbIndex];
   if (!p) return;
@@ -5484,11 +5509,16 @@ function openEditor() {
   document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(x => x.classList.remove('on'));
   document.querySelectorAll('#editor .ed-panel').forEach(x => x.classList.remove('on'));
   edCropBox.style.display = 'none';
+  // 元画像比較をリセット（前の写真の元画像が残らないようにする）
+  edCompareChk.checked = false;
+  document.getElementById('editor').classList.remove('comparing');
+  edOriginal.removeAttribute('src');
   document.getElementById('ed-title').textContent = '編集中: ' + p.filename;
   const img = new Image();
   img.onload = () => {
     edCanvas.width = img.naturalWidth; edCanvas.height = img.naturalHeight;
     edCtx.drawImage(img, 0, 0);
+    edOriginal.src = img.src;
     updateResizeInfo();
     document.getElementById('editor').classList.add('open');
     syncBodyScroll();
@@ -5612,7 +5642,7 @@ document.getElementById('ed-rot-r').onclick = () => rotateEdCanvas(1);
 // 開き直しで fit に戻る。座標換算は表示倍率で行うため編集操作に影響しない。
 const ED_ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 const ED_ZOOM_FIT = 3;
-let edZoomIdx = ED_ZOOM_FIT, edBaseW = 0;
+let edZoomIdx = ED_ZOOM_FIT, edBaseW = 0, edLastFitW = 0;
 function applyEdZoomButtons() {
   const zin = document.getElementById('ed-zoom-in');
   const zout = document.getElementById('ed-zoom-out');
@@ -5625,11 +5655,20 @@ function applyEdZoom() {
   const f = ED_ZOOM_STEPS[edZoomIdx];
   if (f === 1) {
     edCanvas.style.width = ''; edCanvas.style.height = '';
+    edOriginal.style.width = ''; edOriginal.style.height = '';
     edWrap.classList.remove('zoomed');
+    // 比較表示で隠れる前に fit 時の表示幅を覚えておく（ズーム基準の再計測用）
+    if (!document.getElementById('editor').classList.contains('comparing')) {
+      edLastFitW = edCanvas.clientWidth;
+    }
   } else {
-    if (!edBaseW) edBaseW = edCanvas.clientWidth || edCanvas.width;
-    edCanvas.style.width = Math.max(1, Math.round(edBaseW * f)) + 'px';
+    if (!edBaseW) edBaseW = edLastFitW || edCanvas.clientWidth || edCanvas.width;
+    const w = Math.max(1, Math.round(edBaseW * f)) + 'px';
+    edCanvas.style.width = w;
     edCanvas.style.height = 'auto';
+    // 元画像比較中でも同じ大きさで表示できるよう同期する
+    edOriginal.style.width = w;
+    edOriginal.style.height = 'auto';
     edWrap.classList.add('zoomed');
   }
   // 選択中のトリミング枠があれば新しい表示倍率で置き直す
@@ -5646,6 +5685,7 @@ function stepEdZoom(dir) {
 function resetEdZoom() {
   edZoomIdx = ED_ZOOM_FIT; edBaseW = 0;
   edCanvas.style.width = ''; edCanvas.style.height = '';
+  edOriginal.style.width = ''; edOriginal.style.height = '';
   edWrap.classList.remove('zoomed');
   applyEdZoomButtons();
 }
