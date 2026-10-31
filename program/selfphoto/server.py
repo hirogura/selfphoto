@@ -746,6 +746,132 @@ def safe_join(base: Path, rel: str) -> Path | None:
     return p
 
 
+# ------------------------------------------------------------------
+# ぼかしサービス連携 (faceblur / bgblur)
+# ------------------------------------------------------------------
+# 同じ LXD コンテナ内で動く「顔ぼかし」「背景ぼかし」サービス
+# (https://github.com/hirogura/faceblur.git / bgblur.git) を
+# 編集画面から使えるようにする。
+#   - 待ち受けは両サービスとも 127.0.0.1（localhost のみ。ブラウザから直接
+#     到達できない）。selfphoto サーバーが /blur/{svc}/... をプロキシする。
+#   - iframe は selfphoto と同一路元になるため、画面は postMessage で
+#     画像を受け取り、保存ボタンで結果を selfphoto に返す。
+#   - 未インストールなら編集画面の確認から /api/blur-install で
+#     git clone + scripts/install.sh を実行する（api_update と同じく
+#     ProtectSystem=strict の制限を受けない一時ユニットで実行）。
+BLUR_SERVICES = {
+    "faceblur": {"port": 3370,
+                 "repo": "https://github.com/hirogura/faceblur.git"},
+    "bgblur": {"port": 3371,
+               "repo": "https://github.com/hirogura/bgblur.git"},
+}
+_BLUR_LOCK = threading.Lock()
+# {svc: {"state": idle/running/done/error, "log": [...], "started": ts}}
+_BLUR_INSTALL: dict[str, dict] = {}
+
+
+def blur_dir(svc: str) -> Path:
+    """サービスの clone 先（README の手順と同じ /opt/{svc}）。"""
+    return Path("/opt") / svc
+
+
+def blur_installed(svc: str) -> bool:
+    d = blur_dir(svc)
+    return ((d / "scripts" / "install.sh").is_file()
+            or Path(f"/etc/systemd/system/{svc}.service").is_file())
+
+
+def blur_running(svc: str, timeout: float = 2.0) -> bool:
+    """/api/health が応答するかで起動中を判定する。"""
+    port = BLUR_SERVICES[svc]["port"]
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _blur_log(svc: str, line: str) -> None:
+    with _BLUR_LOCK:
+        st = _BLUR_INSTALL.get(svc)
+        if st is not None:
+            st["log"].append(line)
+            if len(st["log"]) > 400:
+                del st["log"][:-400]
+
+
+def _blur_install_worker(svc: str) -> None:
+    info = BLUR_SERVICES[svc]
+    try:
+        script = "\n".join([
+            "set -e",
+            f"if [ ! -f /opt/{svc}/scripts/install.sh ]; then",
+            f"  git clone --depth 1 {info['repo']} /opt/{svc}",
+            "fi",
+            f"cd /opt/{svc}",
+            "bash ./scripts/install.sh",
+        ])
+        # ProtectSystem=strict のユニット内では /opt・/etc が書けないため、
+        # api_update と同じく制限なしの一時ユニットで実行する。
+        if shutil.which("systemd-run") is not None:
+            cmd = ["systemd-run", "--pipe", "--wait", "--collect",
+                   "-p", "ProtectSystem=no", "bash", "-c", script]
+        else:
+            cmd = ["bash", "-c", script]
+        _blur_log(svc, f"==> {svc} をインストールしています…")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:  # type: ignore[union-attr]
+            line = line.rstrip()
+            if line:
+                _blur_log(svc, line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"install.sh が失敗しました (exit {proc.returncode})")
+        # install.sh は systemctl restart 後すぐ返るので、起動確認を待つ
+        for _ in range(30):
+            if blur_running(svc, timeout=1.0):
+                break
+            time.sleep(1.0)
+        if not blur_running(svc):
+            raise RuntimeError(
+                f"サービスが起動しませんでした（journalctl -u {svc} を確認してください）")
+        _blur_log(svc, f"==> インストール完了: {svc} が起動しました")
+        with _BLUR_LOCK:
+            st = _BLUR_INSTALL.get(svc)
+            if st is not None:
+                st["state"] = "done"
+    except Exception as e:  # noqa: BLE001
+        _blur_log(svc, f"==> エラー: {e}")
+        with _BLUR_LOCK:
+            st = _BLUR_INSTALL.get(svc)
+            if st is not None:
+                st["state"] = "error"
+
+
+def blur_install_start(svc: str) -> dict:
+    with _BLUR_LOCK:
+        st = _BLUR_INSTALL.setdefault(
+            svc, {"state": "idle", "log": [], "started": 0.0})
+        if st["state"] == "running":
+            return {"ok": True, "already": True}
+        st["state"] = "running"
+        st["log"] = []
+        st["started"] = time.time()
+    threading.Thread(target=_blur_install_worker, args=(svc,), daemon=True).start()
+    return {"ok": True}
+
+
+def blur_state(svc: str) -> dict:
+    with _BLUR_LOCK:
+        st = _BLUR_INSTALL.get(svc)
+        if st is not None:
+            return {"state": st["state"], "log": list(st["log"]),
+                    "started": st["started"]}
+    return {"state": "idle", "log": [], "started": 0.0}
+
+
 class _BodyReader:
     """Content-Length で区切られたボディを読む軽量リーダー（unshift 対応）。"""
 
@@ -875,7 +1001,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.4.0"
+    server_version = "selfphoto/2.5.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1022,6 +1148,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_sync_stop()
             elif path == "/api/sync/unlink":
                 self.api_sync_unlink()
+            elif path == "/api/blur-install":
+                self.api_blur_install()
+            elif path.startswith("/blur/"):
+                self.api_blur_proxy(path, parsed.query)
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -1167,6 +1297,12 @@ class Handler(BaseHTTPRequestHandler):
             self.api_download_resized(parsed.query)
         elif path == "/api/restart":
             self.api_restart()
+        elif path == "/api/blur-service":
+            self.api_blur_service(parsed.query)
+        elif path == "/api/blur-install-status":
+            self.api_blur_install_status(parsed.query)
+        elif path.startswith("/blur/"):
+            self.api_blur_proxy(path, parsed.query)
         elif path == "/healthz":
             self.send_json({"status": "ok", "time": time.time()})
         else:
@@ -1288,6 +1424,122 @@ class Handler(BaseHTTPRequestHandler):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+    # ------------------------------------------------------------------
+    # ぼかしサービス連携 (faceblur / bgblur)
+    # ------------------------------------------------------------------
+    def api_blur_service(self, query: str) -> None:
+        """GET /api/blur-service?name=faceblur|bgblur — 使える状態を返す。"""
+        from urllib.parse import parse_qs
+
+        name = (parse_qs(query).get("name") or [""])[0]
+        if name not in BLUR_SERVICES:
+            self.send_json({"error": "unknown service"}, 400)
+            return
+        self.send_json({
+            "ok": True,
+            "name": name,
+            "port": BLUR_SERVICES[name]["port"],
+            "repo": BLUR_SERVICES[name]["repo"],
+            "installed": blur_installed(name),
+            "running": blur_running(name),
+            "install": blur_state(name),
+        })
+
+    def api_blur_install_status(self, query: str) -> None:
+        """GET /api/blur-install-status?name=faceblur|bgblur — 導入の進行状況。"""
+        from urllib.parse import parse_qs
+
+        name = (parse_qs(query).get("name") or [""])[0]
+        if name not in BLUR_SERVICES:
+            self.send_json({"error": "unknown service"}, 400)
+            return
+        st = blur_state(name)
+        self.send_json({"ok": True, "name": name, **st,
+                        "installed": blur_installed(name),
+                        "running": blur_running(name)})
+
+    def api_blur_install(self) -> None:
+        """POST /api/blur-install {"name": "faceblur"|"bgblur"} — 導入を開始。
+
+        git clone（なければ）+ scripts/install.sh をバックグラウンドで実行し、
+        進行状況は /api/blur-install-status で返す。既に動いていれば何もしない。
+        """
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        if name not in BLUR_SERVICES:
+            self.send_json({"error": "unknown service"}, 400)
+            return
+        if blur_running(name):
+            self.send_json({"ok": True, "already": True})
+            return
+        res = blur_install_start(name)
+        self.send_json(res)
+
+    def api_blur_proxy(self, path: str, query: str) -> None:
+        """GET/POST /blur/{svc}/... — ぼかしサービスのプロキシ。
+
+        待ち受け 127.0.0.1 のサービスを同じ路元の /blur/{svc}/ で見せる。
+        HTML は /static/ の絶対参照を /blur/{svc}/static/ に書き換える。
+        """
+        import http.client
+
+        m = re.match(r"^/blur/(faceblur|bgblur)(/.*)?$", path)
+        if m is None:
+            self.send_json({"error": "not found"}, 404)
+            return
+        svc = m.group(1)
+        rest = m.group(2) or ""
+        conf = BLUR_SERVICES[svc]
+        url = "/" + rest.lstrip("/")
+        if not rest:
+            url = "/"
+        if query:
+            url += "?" + query
+        headers = {}
+        for key in ("Content-Type", "Accept"):
+            if self.headers.get(key):
+                headers[key] = self.headers[key]
+        for key in self.headers.keys():
+            if key.lower().startswith("x-") and key not in headers:
+                headers[key] = self.headers[key]
+        body = b""
+        if self.command == "POST":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > 0:
+                body = self.rfile.read(length)
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", conf["port"], timeout=180)
+            conn.request(self.command, url, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            code = resp.status
+            ctype = resp.getheader("Content-Type") or "application/octet-stream"
+            conn.close()
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": f"ぼかしサービス({svc})に接続できません: {e}"}, 502)
+            return
+        if "text/html" in ctype:
+            text = data.decode("utf-8", "replace")
+            text = text.replace('"/static/', f'"/blur/{svc}/static/')
+            text = text.replace("'/static/", f"'/blur/{svc}/static/")
+            data = text.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     # ------------------------------------------------------------------
     # APIs
@@ -3491,6 +3743,31 @@ main { padding: 0 8px 80px 228px; }
 #editor .ed-savebar label input { accent-color: var(--accent); cursor: pointer; }
 #ed-overwrite { background: #1d3a24 !important; }
 #ed-tolibrary { background: #1d2f4a !important; }
+/* ---------------- blur service overlay (faceblur / bgblur) ---------------- */
+#blur-ov {
+  position: fixed; inset: 0; z-index: 70; display: none;
+  background: rgba(0,0,0,.97); flex-direction: column;
+}
+#blur-ov.on { display: flex; }
+#blur-ov .blur-bar {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 10px 14px; color: #ddd; font-size: 13px;
+}
+#blur-ov .blur-bar button {
+  background: var(--chip); color: var(--fg); border: 0; border-radius: 8px;
+  padding: 8px 14px; font-size: 13px; cursor: pointer;
+}
+#blur-ov .blur-bar button:hover { background: #33363c; }
+#blur-msg {
+  display: none; flex: none; margin: 0 14px 10px; max-height: 40vh; overflow-y: auto;
+  background: #0e0f11; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; color: var(--muted);
+  white-space: pre-wrap; font-family: monospace;
+}
+#blur-msg.on { display: block; }
+#blur-frame {
+  flex: 1; width: 100%; border: 0; background: #0e0f11;
+}
 /* ---------------- sidebar selection buttons ---------------- */
 #sidebar nav button.on { background: var(--accent); color: #fff; }
 #nav-download, #nav-delete { display: none; }
@@ -3798,6 +4075,8 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
         <label>強度 <input type="range" id="ed-blur-strength" min="1" max="5" step="1" value="3"><span id="ed-blur-strength-v">3</span></label>
         <label>太さ <input type="range" id="ed-blur-size" min="1" max="5" step="1" value="3"><span id="ed-blur-size-v">3</span></label>
       </div>
+      <button id="ed-faceblur">顔ぼかし</button>
+      <button id="ed-bgblur">背景ぼかし</button>
       <button data-tool="shadow">シャドウ</button>
       <div class="ed-panel" id="ed-panel-shadow">
         <div class="ed-hint">暗い部分だけ調整（右で明るく）</div>
@@ -3853,6 +4132,14 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="ed-tolibrary">編集フォルダに保存</button>
     <button id="ed-close">閉じる</button>
   </div>
+</div>
+<div id="blur-ov">
+  <div class="blur-bar">
+    <span id="blur-title"></span>
+    <button id="blur-back">← 編集に戻る</button>
+  </div>
+  <div id="blur-msg"></div>
+  <iframe id="blur-frame" title="ぼかしサービス"></iframe>
 </div>
 <div id="sync-ov">
   <div class="sync-box">
@@ -6540,80 +6827,206 @@ function edStem() {
   const i = n.lastIndexOf('.');
   return i > 0 ? n.slice(0, i) : n;
 }
-document.getElementById('ed-overwrite').onclick = async () => {
-  if (!confirm(`「${ed.filename}」に上書き保存しますか？（元に戻せません）`)) return;
-  const out = await edEncode().catch(() => null);
-  if (!out) { alert('画像の書き出しに失敗しました'); return; }
-  const fd = new FormData();
-  fd.append('path', ed.path);
-  fd.append('file', out.blob, 'edit' + out.ext);
-  let j = null;
+// 編集結果（Blob）を selfphoto に保存する共通処理。
+// 上書き保存 / 別名保存 / 編集フォルダに保存 の 3 程式を
+// 編集保存バーとぼかしサービス（faceblur / bgblur）から共用する。
+// 成功時は編集画面・拡大画面を閉じて一覧を更新する。戻り値は成否。
+async function edSaveBlob(mode, blob, mime) {
+  const extOf = mime => mime === 'image/png' ? '.png' : (mime === 'image/webp' ? '.webp' : '.jpg');
+  const ext = extOf(mime);
+  if (mode === 'overwrite') {
+    if (!confirm(`「${ed.filename}」に上書き保存しますか？（元に戻せません）`)) return false;
+  }
+  const name = edStem() + '_edit' + ext;
+  let url, fd, j = null;
+  if (mode === 'library') {
+    url = '/api/edit-save';
+    fd = new FormData();
+    fd.append('name', name);
+    fd.append('src', ed.path);
+    fd.append('file', blob, name);
+  } else if (mode === 'saveas') {
+    // 元画像と同じフォルダに別名保存する（撮影日時は EXIF で引き継がれるため
+    // 並び順は変わらない）。edit/ が元なら編集フォルダに保存される。
+    url = '/api/edit-saveas';
+    fd = new FormData();
+    fd.append('path', ed.path);
+    fd.append('name', name);
+    fd.append('file', blob, name);
+  } else {
+    url = '/api/edit-overwrite';
+    fd = new FormData();
+    fd.append('path', ed.path);
+    fd.append('file', blob, 'edit' + ext);
+  }
   try {
-    const r = await fetch('/api/edit-overwrite', { method: 'POST', body: fd });
+    const r = await fetch(url, { method: 'POST', body: fd });
     j = await r.json();
   } catch (err) {
     alert('保存に失敗しました（通信エラー）');
-    return;
+    return false;
   }
   if (!j || !j.ok) {
     alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
-    return;
+    return false;
   }
   closeEditor(true);
   document.getElementById('lb-close').click();
-  reload();
+  if (mode === 'library' || (j.path && j.path.startsWith('edit/'))) setView('edits');
+  else reload();
+  return true;
+}document.getElementById('ed-overwrite').onclick = async () => {
+  const out = await edEncode().catch(() => null);
+  if (!out) { alert('画像の書き出しに失敗しました'); return; }
+  edSaveBlob('overwrite', out.blob, out.mime);
 };
 document.getElementById('ed-saveas').onclick = async () => {
   const out = await edEncode().catch(() => null);
   if (!out) { alert('画像の書き出しに失敗しました'); return; }
-  // 元画像と同じフォルダに別名保存する（撮影日時は EXIF で引き継がれるため
-  // 並び順は変わらない）。edit/ が元なら編集フォルダに保存される。
-  const name = edStem() + '_edit' + out.ext;
-  const fd = new FormData();
-  fd.append('path', ed.path);
-  fd.append('name', name);
-  fd.append('file', out.blob, name);
-  let j = null;
-  try {
-    const r = await fetch('/api/edit-saveas', { method: 'POST', body: fd });
-    j = await r.json();
-  } catch (err) {
-    alert('保存に失敗しました（通信エラー）');
-    return;
-  }
-  if (!j || !j.ok) {
-    alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
-    return;
-  }
-  closeEditor(true);
-  document.getElementById('lb-close').click();
-  if (j.path && j.path.startsWith('edit/')) setView('edits');
-  else reload();
+  edSaveBlob('saveas', out.blob, out.mime);
 };
 document.getElementById('ed-tolibrary').onclick = async () => {
   const out = await edEncode().catch(() => null);
   if (!out) { alert('画像の書き出しに失敗しました'); return; }
-  const name = edStem() + '_edit' + out.ext;
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('src', ed.path);
-  fd.append('file', out.blob, name);
+  edSaveBlob('library', out.blob, out.mime);
+};
+
+// ---------------- ぼかしサービス連携 (faceblur / bgblur) ----------------
+// 「顔ぼかし」/「背景ぼかし」で同じコンテナのぼかしサービスを iframe で開く。
+//   - 画像は iframe ロード後に postMessage で渡す（embed=selfphoto モード）。
+//   - サービス側の保存ボタン（上書き保存 / 別名保存 / 編集フォルダに保存）は
+//     postMessage {type:'selfphoto-save'} で結果 Blob を返すのでそれを保存する。
+//   - 未導入なら確認 → /api/blur-install で導入（進行状況を表示）して開く。
+const edBlurOv = document.getElementById('blur-ov');
+const edBlurFrame = document.getElementById('blur-frame');
+const edBlurMsg = document.getElementById('blur-msg');
+const edBlurTitle = document.getElementById('blur-title');
+const ED_BLUR_SERVICES = {
+  faceblur: { label: '顔ぼかし', port: 3370 },
+  bgblur: { label: '背景ぼかし', port: 3371 },
+};
+let edBlurBlob = null;   // iframe に渡す待ち画像（Blob）
+let edBlurSent = false;  // postMessage 送信済みフラグ
+let edBlurSvc = null;    // 表示中のサービス名
+
+function edBlurHide() {
+  edBlurOv.classList.remove('on');
+  edBlurFrame.src = 'about:blank';
+  edBlurMsg.classList.remove('on');
+  edBlurBlob = null; edBlurSent = false; edBlurSvc = null;
+}
+document.getElementById('blur-back').onclick = () => edBlurHide();
+
+async function edBlurOpen(svc) {
+  const meta = ED_BLUR_SERVICES[svc];
   let j = null;
   try {
-    const r = await fetch('/api/edit-save', { method: 'POST', body: fd });
+    const r = await fetch('/api/blur-service?name=' + svc);
     j = await r.json();
-  } catch (err) {
-    alert('保存に失敗しました（通信エラー）');
+  } catch (err) { /* 後で判定 */ }
+  if (!j || !j.ok) { alert('状態を取得できませんでした'); return; }
+  edBlurSvc = svc;
+  edBlurMsg.classList.remove('on');
+  edBlurOv.classList.add('on');
+  if (!j.installed || !j.running) {
+    // 未導入 or 停止中 → 導入（install.sh は再実行で起動する）するか確認
+    if (!confirm(`${meta.label}（${svc}）はこのコンテナにインストールされていません（または停止中）。インストールしますか？\n` +
+                 'Git clone + インストールスクリプトの実行で、初回は数分かかります。')) {
+      edBlurHide();
+      return;
+    }
+    await edBlurInstall(svc);
+    if (!(await edBlurWaitHealthy(svc, 60))) {
+      edBlurMsg.classList.add('on');
+      edBlurMsg.textContent = `${meta.label}（${svc}）の起動を確認できませんでした。\n「編集に戻る」で戻ってください。`;
+      return;
+    }
+  }
+  edBlurMsg.classList.remove('on');
+  // 現在のキャンバス（編集結果）を送る Blob として保持
+  const out = await edEncode().catch(() => null);
+  edBlurBlob = out;
+  edBlurSent = false;
+  edBlurFrame.src = `/blur/${svc}/?embed=selfphoto&t=${Date.now()}`;
+}
+document.getElementById('ed-faceblur').onclick = () => edBlurOpen('faceblur');
+document.getElementById('ed-bgblur').onclick = () => edBlurOpen('bgblur');
+
+async function edBlurInstall(svc) {
+  const label = ED_BLUR_SERVICES[svc].label;
+  edBlurMsg.classList.add('on');
+  edBlurMsg.textContent = `${label}（${svc}）をインストールしています…`;
+  let started = false;
+  try {
+    const r = await fetch('/api/blur-install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: svc }),
+    });
+    const j = await r.json();
+    started = !!(j && j.ok) || (j && j.already);
+    if (j && j.error) started = false;
+  } catch (err) { started = false; }
+  if (!started) {
+    edBlurMsg.textContent = 'インストールを開始できませんでした';
     return;
   }
-  if (!j || !j.ok) {
-    alert('保存に失敗しました: ' + ((j && j.error) || 'unknown error'));
-    return;
+  // 進行状況を 2 秒ごとに表示し、done / error / idle で抜ける
+  for (;;) {
+    await new Promise(res => setTimeout(res, 2000));
+    let j = null;
+    try {
+      const r = await fetch('/api/blur-install-status?name=' + svc);
+      j = await r.json();
+    } catch (err) { continue; }
+    if (!j || !j.ok) continue;
+    const lines = (j.log || []).slice(-12).join('\n');
+    edBlurMsg.textContent = (j.state === 'running' ? '導入中…\n\n' : j.state + '\n\n') + lines;
+    edBlurMsg.scrollTop = edBlurMsg.scrollHeight;
+    if (j.state === 'done' || j.state === 'error' || j.state === 'idle') break;
   }
-  closeEditor(true);
-  document.getElementById('lb-close').click();
-  setView('edits');
-};
+}
+
+async function edBlurWaitHealthy(svc, timeoutSec) {
+  const limit = Date.now() + timeoutSec * 1000;
+  for (;;) {
+    try {
+      const r = await fetch('/api/blur-service?name=' + svc);
+      const j = await r.json();
+      if (j && j.ok && j.running) return true;
+      if (j && j.install && j.install.state === 'error') return false;
+    } catch (err) { /* リトライ */ }
+    if (Date.now() > limit) return false;
+    await new Promise(res => setTimeout(res, 1500));
+  }
+}
+
+// iframe 側 (faceblur/bgblur) からの通知
+window.addEventListener('message', async ev => {
+  const d = ev.data || {};
+  if (d.type === 'selfphoto-ready') {
+    // iframe の準備ができたら編集キャンバスの画像を送る（load 時の送信と二重防止）
+    edBlurSendBlob();
+  } else if (d.type === 'selfphoto-save') {
+    if (!edBlurSvc || !d.blob) return;
+    const ok = await edSaveBlob(d.mode, d.blob, d.mime || 'image/png');
+    if (ok) edBlurHide();
+  }
+});
+function edBlurSendBlob() {
+  if (edBlurSent || !edBlurBlob) return;
+  edBlurSent = true;
+  edBlurFrame.contentWindow.postMessage({
+    type: 'selfphoto-load',
+    blob: edBlurBlob.blob,
+    mime: edBlurBlob.mime,
+    name: (edStem() + edBlurBlob.ext),
+  }, '*');
+}
+edBlurFrame.addEventListener('load', () => {
+  // ready 通知は iframe 内アプリの起動後なので、load 時点でも一度送る。
+  // 二重送信は edBlurSent で抑止し、側の準備ができていない場合は ready でもう一度。
+  setTimeout(edBlurSendBlob, 300);
+});
 
 // infinite scroll は上の scroll ハンドラに統合
 

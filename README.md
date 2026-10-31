@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.2.4.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.2.5.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -208,6 +208,14 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - **1つ戻す** : 直前の操作を取り消し（最大20手前まで。筆操作は1ストローク単位）
 - **元画像と比較** : 保存バー左の「元画像と比較する」チェックボックスで、
   編集開始時の元画像を表示（チェックを外すと編集画面に戻る）
+- **顔ぼかし / 背景ぼかし** : 同じ LXD コンテナの [faceblur](https://github.com/hirogura/faceblur.git)
+  （顔ぼかし・ポート3370）/ [bgblur](https://github.com/hirogura/bgblur.git)
+  （背景ぼかし・ポート3371）を編集画面から iframe で使う。
+  その時点の編集結果が渡され、加工後はサービス側の selfphoto 用ボタンで
+  上書き保存 / 別名保存 / 編集フォルダに保存 ができる。
+  ポート 3370/3371 は localhost のみのため selfphoto サーバーが
+  `/blur/{svc}/` でプロキシする。未インストールの場合は確認のうえ
+  そのコンテナに自動インストールする（git clone + install.sh。初回は数分）
 
 保存方法（png→PNG・webp→WebP で元形式を維持、それ以外は JPEG で書き出し）：
 
@@ -282,6 +290,10 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - `POST /api/edit-overwrite` — 編集結果で上書き保存（multipart `path` + ファイル）
 - `POST /api/rename` — ファイル名を変更（JSON `{"path", "name"}`。拡張子は維持、DB・サムネイルも追従）
 - `POST /api/rotate` — 元画像を90度回転して上書き保存（JSON `{"path", "dir": "left"|"right"}`。EXIF維持、サムネイル・DBも更新。動画は対象外）
+- `GET /api/blur-service?name=faceblur|bgblur` — ぼかしサービス（faceblur / bgblur）を編集画面から iframe で使える状態を返す（`installed` / `running` / 導入ステータス）
+- `POST /api/blur-install` — ぼかしサービスを同じコンテナに導入（JSON `{"name": "faceblur"|"bgblur"}`。git clone + scripts/install.sh をバックグラウンドで実行）
+- `GET /api/blur-install-status?name=...` — 導入の進行状況（`state: idle/running/done/error` とログ）
+- `GET|POST /blur/{svc}/...` — ぼかしサービスへのプロキシ（127.0.0.1 のみ待ち受けのため。HTML 内の `/static/` 参照は `/blur/{svc}/static/` に書き換え）
 - `GET /api/backup-config` — バックアップ設定を取得（パスワードはマスク）
 - `POST /api/backup-config` — バックアップ設定を保存
 - `POST /api/backup-run` — バックアップを今すぐ実行（バックグラウンド。ターゲットが無ければ自動作成）
