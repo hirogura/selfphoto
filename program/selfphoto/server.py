@@ -875,7 +875,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.2.0"
+    server_version = "selfphoto/2.3.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1163,6 +1163,8 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_photo(path[len("/photo/"):])
         elif path == "/api/zip":
             self.api_zip(parsed.query)
+        elif path == "/api/download-resized":
+            self.api_download_resized(parsed.query)
         elif path == "/api/restart":
             self.api_restart()
         elif path == "/healthz":
@@ -1500,6 +1502,94 @@ class Handler(BaseHTTPRequestHandler):
             for chunk in self._zip_chunks(base, prefix):
                 self._write_chunk(chunk)
             self._write_chunk(b"")  # 終端
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def api_download_resized(self, query: str) -> None:
+        """元画像を長辺 max ピクセルに縮小してダウンロードさせる（縮小ダウンロード用）。
+
+        GET /api/download-resized?src=/photo/2026/202609/IMG_0001.jpg&max=1024
+        src は /photo/<相対パス> または /editphoto/<名前>。すでに長辺が
+        max 以下の画像は元ファイルをそのまま返す。
+        """
+        from urllib.parse import parse_qs
+        import io
+
+        q = parse_qs(query)
+        src = (q.get("src", [""])[0] or "").strip()
+        try:
+            max_side = int(q.get("max", ["1024"])[0])
+        except ValueError:
+            max_side = 1024
+        max_side = max(16, min(8192, max_side))
+        orig = None
+        if src.startswith("/editphoto/"):
+            name = unquote(src[len("/editphoto/"):]).split("?")[0]
+            # 編集フォルダはフラット配置のみ扱う（serve_editphoto と同じ規則）
+            orig = safe_join(common.EDIT_PHOTO_DIR, name) if "/" not in name else None
+        elif src.startswith("/photo/"):
+            orig = safe_join(common.PHOTO_DIR, unquote(src[len("/photo/"):]).split("?")[0])
+        if orig is None or not orig.is_file():
+            self.send_json({"error": "file not found"}, 404)
+            return
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            # Pillow 無しでは縮小できない。元画像をそのまま返す。
+            self.send_file(orig, download_name=orig.name)
+            return
+        try:
+            with Image.open(orig) as im:
+                # WebP アニメ対策で先頭フレームのみ
+                try:
+                    im.seek(0)
+                except Exception:
+                    pass
+                # Exif Orientation を反映（縮小後の向きが表示どおりになる）
+                try:
+                    disp = ImageOps.exif_transpose(im)
+                except Exception:
+                    disp = im
+                if disp is None:
+                    disp = im
+                w, h = disp.size
+                if max(w, h) <= max_side:
+                    self.send_file(orig, download_name=orig.name)
+                    return
+                scale = max_side / max(w, h)
+                onw, onh = int(round(w * scale)), int(round(h * scale))
+                # 縮小は表示向きの実ピクセルに対してかける
+                resized = disp.resize((onw, onh), Image.LANCZOS)
+                suffix = orig.suffix.lower()
+                dl_name = orig.name
+                if suffix in (".png",):
+                    converted = resized.convert("RGBA")
+                    fmt, ctype, kwargs = "PNG", "image/png", {"optimize": True}
+                elif suffix in (".webp",):
+                    converted = resized.convert("RGB")
+                    fmt, ctype, kwargs = "WEBP", "image/webp", {"quality": 90, "method": 4}
+                else:
+                    # jpg/jpeg 以外（heic / tif / bmp / gif 等）は JPEG に変換し、
+                    # 名前も実体に合わせて .jpg に替える
+                    converted = resized.convert("RGB")
+                    fmt, ctype, kwargs = "JPEG", "image/jpeg", {"quality": 90}
+                    if suffix not in (".jpg", ".jpeg"):
+                        dl_name = str(Path(dl_name).with_suffix(".jpg"))
+                buf = io.BytesIO()
+                converted.save(buf, fmt, **kwargs)
+                data = buf.getvalue()
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"error": f"resize failed: {e}"}, 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition",
+                         f"attachment; filename*=UTF-8''{quote(dl_name)}")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -3622,6 +3712,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <button data-act="copy">コピー</button>
   <button data-act="edit">編集</button>
   <button data-act="dl">ダウンロード</button>
+  <button data-act="dls">縮小ダウンロード</button>
   <button data-act="del">削除</button>
 </div>
 <div id="lightbox">
@@ -4917,11 +5008,23 @@ async function downloadUrl(url, filename) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+// 縮小ダウンロード（右クリックメニュー用）。サーバ側で長辺 1024px に縮小して
+// からダウンロードする。もともと小さい画像は元ファイルがそのまま返る。
+// 動画や元 URL が想定外の形の場合は通常ダウンロードにフォールバックする。
+async function downloadResized(p) {
+  const src = (p.original || '').split('?')[0];
+  if (p.isVideo || !(src.startsWith('/photo/') || src.startsWith('/editphoto/'))) {
+    await downloadUrl(p.original, p.filename);
+    return;
+  }
+  await downloadUrl(`/api/download-resized?src=${encodeURIComponent(src)}&max=1024`);
 }
 
 // ---------------- thumbnail context menu ----------------
-// サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・ダウンロード・削除）。
+// サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・ダウンロード・縮小ダウンロード・削除）。
 // 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
 // コピーは元画像をクリップボードへ書き込む（拡大画面の「コピー」と同じ処理）。
 // 複数選択モードで右クリックした写真が選択中なら、回転・ダウンロード・削除は
@@ -4983,6 +5086,11 @@ if (ctxMenu) {
         // 1 枚だけなら従来どおりその写真のみ、複数選択時はサイドバーと同じ一括ダウンロード
         if (targets.length > 1) await downloadPhotos(targets);
         else await downloadUrl(p.original, p.filename);
+      }
+      else if (act === 'dls') {
+        // 縮小ダウンロード（長辺 1024px。それより小さい画像は元のまま）。
+        // 動画は対象外（メニュー側で無効化される）。
+        for (const t of targets) await downloadResized(t);
       }
       else if (act === 'del') {
         // ビューア表示中なら削除後に表示を整える（ビューアの削除ボタンと同じ挙動）

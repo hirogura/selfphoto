@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.1.9.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v.2.3.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -181,6 +181,7 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - **コピー** : 元画像をクリップボードへコピー
 - **編集** : 対象の画像で編集画面に移行
 - **ダウンロード** : 元画像をダウンロード
+- **縮小ダウンロード** : 長辺 1024px に縮小してダウンロード（それより小さい画像は元のまま）
 - **削除** : 対象を削除（一覧・ファイル実体・サムネイル。確認あり）
 
 ## 画像編集
@@ -272,6 +273,7 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - `POST /api/upload` — multipart 一括アップロード（manifest フィールドで各ファイルの lastModified を渡せる。結果に `duplicate`・`duplicates` を含む）
 - `GET /api/months` — 月ごとの件数・写真総数・編集写真件数
 - `GET /api/zip?prefix=<photo/ からの相対フォルダ>&name=<zip名>` — フォルダを zip 圧縮してダウンロード
+- `GET /api/download-resized?src=<photo/editphoto の元画像URL>&max=1024` — 長辺 max ピクセルに縮小してダウンロード（それより小さい画像は元のまま）
 - `POST /api/delete` — 写真を削除（JSON `{"paths": [...]}`。ファイル実体・サムネイル・DB 行。`edit/` prefix で編集フォルダ内も可）
 - `GET /api/edits` — 編集画像フォルダの一覧
 - `POST /api/edit-save` — 編集結果を編集フォルダに保存（multipart）
