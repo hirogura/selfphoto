@@ -1001,7 +1001,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.5.0"
+    server_version = "selfphoto/2.6.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4000,6 +4000,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <button data-act="rot-r">右回転</button>
   <button data-act="copy">コピー</button>
   <button data-act="edit">編集</button>
+  <button data-act="edit-s">縮小編集</button>
   <button data-act="dl">ダウンロード</button>
   <button data-act="dls">縮小ダウンロード</button>
   <button data-act="del">削除</button>
@@ -5324,11 +5325,11 @@ async function downloadResized(p) {
 }
 
 // ---------------- thumbnail context menu ----------------
-// サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・ダウンロード・縮小ダウンロード・削除）。
+// サムネイル一覧の右クリックメニュー（左回転・右回転・コピー・編集・縮小編集・ダウンロード・縮小ダウンロード・削除）。
 // 回転はサーバ側で元画像を90度回転し、EXIF維持で上書き保存する。
 // コピーは元画像をクリップボードへ書き込む（拡大画面の「コピー」と同じ処理）。
 // 複数選択モードで右クリックした写真が選択中なら、回転・ダウンロード・削除は
-// 選択中の写真すべてを対象にする（コピー・編集は従来どおり 1 枚のみ）。
+// 選択中の写真すべてを対象にする（コピー・編集・縮小編集は従来どおり 1 枚のみ）。
 let ctxPhoto = null;
 const ctxMenu = document.getElementById('ctx-menu');
 function hideCtxMenu() {
@@ -5382,6 +5383,7 @@ if (ctxMenu) {
       }
       else if (act === 'copy') await copyCtxPhoto(p);
       else if (act === 'edit') openEditorForPhoto(p);
+      else if (act === 'edit-s') openEditorForPhoto(p, 1024);
       else if (act === 'dl') {
         // 1 枚だけなら従来どおりその写真のみ、複数選択時はサイドバーと同じ一括ダウンロード
         if (targets.length > 1) await downloadPhotos(targets);
@@ -5450,13 +5452,13 @@ async function rotateThumbPhotos(list, dir) {
   if (failed.length) notes.push(`回転に失敗しました（${failed.length} 件）: ${failed.join(', ')}`);
   if (notes.length) alert(notes.join('\n'));
 }
-function openEditorForPhoto(p) {
+function openEditorForPhoto(p, shrinkMax) {
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
   const idx = state.photos.findIndex(x => x.path === p.path);
   if (idx < 0) return;
   lbIndex = idx;
   showLb();
-  openEditor();
+  openEditor(shrinkMax);
 }
 
 const nowViewing = document.getElementById('now-viewing');
@@ -5784,7 +5786,7 @@ edCompareChk.onchange = () => {
   document.getElementById('editor').classList.toggle('comparing', on);
 };
 
-function openEditor() {
+function openEditor(shrinkMax) {
   const p = state.photos[lbIndex];
   if (!p) return;
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
@@ -5811,7 +5813,17 @@ function openEditor() {
     syncBodyScroll();
   };
   img.onerror = () => alert('画像を読み込めませんでした');
-  img.src = p.original + (p.original.includes('?') ? '&' : '?') + 't=' + Date.now();
+  // 縮小編集（右クリックメニューの「縮小編集」）: 長辺 1024px に縮小した画像を
+  // 編集対象にする。すでに 1024px 以下ならサーバ側で元画像がそのまま返る。
+  // 保存は ed.path（元写真）に対して行われるため、上書き保存で縮小結果が残る。
+  let loadSrc = p.original;
+  if (shrinkMax) {
+    const base = loadSrc.split('?')[0];
+    if (base.startsWith('/photo/') || base.startsWith('/editphoto/')) {
+      loadSrc = `/api/download-resized?src=${encodeURIComponent(base)}&max=${shrinkMax}`;
+    }
+  }
+  img.src = loadSrc + (loadSrc.includes('?') ? '&' : '?') + 't=' + Date.now();
 }
 function closeEditor(force) {
   if (!force && ed.dirty && !confirm('編集内容を破棄して閉じますか？')) return;
