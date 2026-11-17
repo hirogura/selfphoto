@@ -1,7 +1,7 @@
 # selfphoto
 
 セルフホストできる写真管理ソフトです。
-Tailscale 経由で公開します（バージョン: v.2.6.0 — `common.py` の `VERSION` で管理、
+Tailscale 経由で公開します（バージョン: v2.6.0 — `common.py` の `VERSION` で管理、
 Web UI 左上に表示）。
 
 依存は Python 3.10+ の標準ライブラリのみ（Pillow は推奨）。インストールスクリプト
@@ -9,9 +9,10 @@ Web UI 左上に表示）。
 
 写真・サムネイル・DB はプログラム領域 (`/opt/selfphoto`) とは切り離し、
 `/opt/lxd-data/selfphoto-data` 配下に置いています（写真データがワークスペース／配布物に
-混入して誤ってアップロードされることがないようにするため）
+混入して誤ってアップロードされることがないようにするため）。
 さらに写真の本体は `photo/` 配下に集約しているので、**バックアップは
-`/opt/lxd-data/selfphoto-data/photo` だけをコピーすればよいはずです**。
+`/opt/lxd-data/selfphoto-data/photo` だけをコピーすればよいです**。
+サムネイル・プレビュー・DB は再生成可能なので、バックアップ・同期の対象外です。
 
 ## 構成
 
@@ -29,8 +30,11 @@ Web UI 左上に表示）。
 ├── photo/                      # ★写真の本体（バックアップはこのフォルダだけ）
 │   └── 2026/202609/20260911_/IMG_0001.jpg  # 年/年月/年月日_ フォルダに自動整理
 ├── thumbnail/2026/202609/20260911__IMG_0001_thumb.webp  # サムネイル（photo/ と同じ階層構造）
+├── thumbnail-view/2026/202609/20260911__IMG_0001_view.webp  # ビューア用プレビュー（長辺1280px）
 ├── edit-photo/                 # 編集モードで保存した画像（サイドバー「編集写真」で表示）
-└── selfphoto.db                # SQLite DB（WAL）
+├── selfphoto.db                # SQLite DB（WAL）
+├── backup.json                 # バックアップ設定（パスワードを含むため 600）
+└── sync_config.json            # 同期の役割・相手・時刻・結果
 ```
 
 - ポート: 127.0.0.1:3360（tailscale serve で公開）
@@ -136,11 +140,13 @@ python3 -m selfphoto.ingest thumbs
 python3 -m selfphoto.server
 ```
 
-Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集写真／検索／
-バックアップ／インポート／複数選択／アップロード。写真・編集写真の右に件数を表示。
-検索時はサイドバーに検索欄が現れる。
-左下に「再起動」ボタン — 押すと selfphoto-server.service を再起動、
-「アップデート」ボタン — 押すと GitHub から最新版を取得して更新）、
+Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集写真／検索／同期／
+バックアップ／インポート／複数選択／ダウンロード／削除／アップロード。
+写真・編集写真の右に件数を表示。検索時はサイドバーに検索欄が現れる。
+左下に同期状態（ON/OFF・同期中・前回結果）とバックアップ監視状態を表示
+（クリックでそれぞれの設定画面へ）。その下に「再起動」ボタン
+— 押すと selfphoto-server.service を再起動、「アップデート」ボタン
+— 押すと GitHub から最新版を取得して更新）、
 上部ツールバーは無く、月見出しがそのまま先頭に吸着する
 新しい順のタイムライン（月見出し＋日付見出し＋グリッド）、
 右端のスクロールインジケータ（年月バー・クリックでジャンプ、スクロール中は
@@ -224,6 +230,31 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - **別名保存** : 通常の取り込みとして新規登録（`元の名前_edit`＋元形式の拡張子）
 - **編集フォルダに保存** : `edit-photo/` に保存。サイドバー「編集写真」で表示
 
+## 同期（別PCとの写真同期）
+
+サイドバー「同期」（または左下の同期状態）で、Tailnet 内の別PCで動いている
+selfphoto と写真ライブラリを同期できます（予備機用途。同期先は1箇所のみ）。
+相手PCも最新版の selfphoto に更新しておいてください。
+
+- **役割** : 「同期元（送る側）」／「同期先（受ける側）」を選ぶ。保存すると
+  相手側は自動で反対の役割に切り替わり、同期時刻も共有される
+- **同期相手** : `tailscale status` で取得した Tailnet 内のマシン一覧から
+  プルダウンで選択（API では URL を直接指定することも可）
+- **同期時刻** : `HH:MM`（既定 03:00）。1日1回、この時刻以降に自動同期する。
+  自動同期を実行するのは同期先のみで、データの流れは常に同期元→同期先の pull
+  （push は行わない）。時刻を変更すると当日の同期済みフラグがリセットされ、
+  すぐにテストできる
+- **今すぐ同期** : 同期先は相手から取得（pull）し、同期元は相手に pull を指示する。
+  完了・失敗の結果は相手から通知され、同期元の表示にも反映される
+- **同期を停止** : 相手指定を外して自動同期を停止（相手側の指定も解除される）
+
+同期対象は `photos` テーブルの行・`photo/` の原本・`edit-photo/` の原本のみです。
+サムネイル・ビューア用プレビューは転送せず、受信側で再生成します。
+転送はハッシュ比較による増分＋最大 32MB のチャンク分割で行い、
+同期元に無い行・ファイルは受信側から削除（片方向ミラー）されます。
+設定と結果は `/opt/lxd-data/selfphoto-data/sync_config.json` に保存されます。
+自動同期が失敗した場合は 600 秒間は再試行を抑制します。
+
 ## バックアップ
 
 サイドバー「バックアップ」で rsync によるコピー設定を行う
@@ -257,11 +288,16 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
   `sudo ssh-copy-id -i /root/.ssh/id_ed25519.pub user@バックアップ先ホスト`）。
 - **オプション固定** : `-r`（再帰） `-t`（時刻維持） `-u`（新しいもののみ）
   `-v`（詳細） `--progress`（進捗）
+- **ミラーリング** : オンにすると `--delete` を付けて、ソースに無いファイルを
+  ターゲット側からも削除する（既定 Off。ターゲットの不要ファイルを消すので注意）
 - **コピー実行** : 今すぐコピー（バックグラウンド実行、状態表示で進捗確認）
-- **監視開始** : 保存・取込で写真が増えたら、選択した間隔（1/5/15/30/60分、
-  既定5分）で自動コピー。変更がなければ実行しないため、保存のたびに
-  全体走査する方式より軽い。サーバー再起動後も設定どおり復帰する。
-  Web以外（スキャン・CLI取込）で増えた分も検知する。間隔の変更は保存時に即時反映される
+- **監視開始** : rsyncgui と同じ2種類のモードがある
+  - **間隔モード** : 保存・取込で写真が増えたら、選択した間隔（1/5/15/30/60分、
+    既定5分）で自動コピー。変更がなければ実行しないため、保存のたびに
+    全体走査する方式より軽い
+  - **指定時刻モード** : `HH:MM` を複数・曜日を指定して、その時刻に自動コピー
+  サーバー再起動後も設定どおり復帰する。Web以外（スキャン・CLI取込）で増えた分も
+  検知する。設定の変更は保存時に即時反映される
 
 ## 設定（環境変数）
 
@@ -271,6 +307,7 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 | `SELFPHPHOTO_DATA_DIR` | `/opt/lxd-data/selfphoto-data` | DB・サムネイル等のデータの置き場所 |
 | `SELFPHPHOTO_PHOTO_DIR` | `/opt/lxd-data/selfphoto-data/photo` | 写真の保存先（バックアップ対象） |
 | `SELFPHPHOTO_THUMB_DIR` | `/opt/lxd-data/selfphoto-data/thumbnail` | サムネイル保存先 |
+| `SELFPHPHOTO_VIEW_DIR` | `/opt/lxd-data/selfphoto-data/thumbnail-view` | ビューア用プレビュー（長辺1280px）の保存先 |
 | `SELFPHPHOTO_EDIT_DIR` | `/opt/lxd-data/selfphoto-data/edit-photo` | 編集画像フォルダ |
 | `SELFPHPHOTO_DB` | `/opt/lxd-data/selfphoto-data/selfphoto.db` | SQLite DB |
 | `SELFPHPHOTO_HOST` | `127.0.0.1` | 待ち受けアドレス |
@@ -308,9 +345,21 @@ Web UI: 馴染みやすいレイアウト。左サイドバー（写真／編集
 - `GET /api/import-status` — 取り込みの状態・前回結果
 - `POST /api/scan` — 既存の selfphoto-data から取り込む（バックグラウンド実行）
 - `GET /api/scan-status` — scan の状態・前回結果
+- `GET /api/sync/config` — 同期設定・状態（役割・相手・時刻・最終同期・結果・実行中）
+- `POST /api/sync/config` — 同期設定を保存（JSON `{"role", "peer", "peer_name", "sync_time"}`。相手側も反対の役割に設定）
+- `GET /api/sync/peers` — tailnet 内の同期相手候補（`tailscale status` から取得）
+- `GET /api/sync/manifest` — 同期元の DB 一覧（`photos` / `edits` / `exported_at`）
+- `POST /api/sync/files` — 同期元がファイルのチャンクを返す（JSON `{"chunks": [{"rel", "offset", "length"}]}`）
+- `POST /api/sync/run` — 今すぐ同期（同期先は pull、同期元は相手に pull を指示）
+- `POST /api/sync/trigger` — 同期元からの指示で pull をバックグラウンド実行
+- `POST /api/sync/done` — 同期先から結果を通知し、同期元の表示を更新
+- `POST /api/sync/stop` — 同期を停止（相手側の指定も解除）
+- `POST /api/sync/unlink` — 相手側で停止されたときに相手指定を解除
+- `POST /api/sync/role` — 相手側から役割・同期時刻を受け取る
 - `POST /api/restart` — selfphoto-server.service を再起動（systemd 環境のみ）
 - `POST /api/update` — GitHub から最新版を取得して更新（systemd 環境では続けて再起動）
 - `GET /thumb/<相対パス>_thumb.webp` — サムネイル
+- `GET /view/<相対パス>_view.webp` — ビューア用プレビュー（長辺1280pxのWebP）
 - `GET /photo/<相対パス>` — オリジナル（Range 対応、動画シーク可）
 - `GET /healthz` — ヘルスチェック
 
@@ -345,4 +394,3 @@ sudo rm -rf /opt/lxd-data/selfphoto-data
 ## ライセンス
 
 MIT License — 詳細は [LICENSE](LICENSE) を参照。
-# selfphoto
