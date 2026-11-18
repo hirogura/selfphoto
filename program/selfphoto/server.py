@@ -1032,7 +1032,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.8.0"
+    server_version = "selfphoto/2.9.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3913,6 +3913,13 @@ main { padding: 0 8px 80px 228px; }
 body.selecting .cell .sel-box { display: flex; }
 .cell.selected .sel-box { background: var(--accent); border-color: var(--accent); }
 .cell.selected img { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 選択モード中は画像のネイティブドラッグを止め、範囲選択を優先する */
+body.selecting .cell img { -webkit-user-drag: none; user-select: none; }
+/* ドラッグ範囲選択の枠（選択モード中のみ表示） */
+#drag-select {
+  position: fixed; z-index: 25; display: none; pointer-events: none;
+  border: 1px solid var(--accent); background: rgba(76,141,255,.15);
+}
 .month-head .sel-box, .day-head .sel-box {
   position: absolute; top: 50%; left: 10px; transform: translateY(-50%);
   margin-left: 0; margin-top: 0;
@@ -4090,6 +4097,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
 </main>
 <div id="scrubber"></div>
 <div id="now-viewing"></div>
+<div id="drag-select"></div>
 <input type="file" id="file-input" multiple accept="image/*,video/*" style="display:none">
 <div id="dropzone"><div class="dz-inner">ドロップでアップロード</div></div>
 <div id="up-bar"><div id="up-label"></div><div id="up-track"><div id="up-fill"></div></div></div>
@@ -5104,21 +5112,138 @@ function makeCell(p) {
   return c;
 }
 
+// ファイル個別操作では見出しの明示チェックを付けない。逆に外れた場合は
+// 所属フォルダ・月の明示を解除する（全選択状態が崩れるため）。
+function clearHeadSelFor(path) {
+  const seg = path.split('/');
+  if (seg.length >= 3) state.folderSel.delete(seg.slice(0, 3).join('/'));
+  if (seg.length >= 2) state.monthSel.delete(seg.slice(0, 2).join('/') + '/');
+}
+
+function selectPaths(paths) {
+  let changed = false;
+  paths.forEach(path => {
+    if (state.selected.has(path)) return;
+    state.selected.add(path);
+    clearHeadSelFor(path);
+    changed = true;
+  });
+  return changed;
+}
+
 function toggleSel(p) {
   if (state.selected.has(p.path)) state.selected.delete(p.path);
   else state.selected.add(p.path);
-  // ファイル個別操作では見出しの明示チェックを付けない。逆に外れた場合は
-  // 所属フォルダ・月の明示を解除する（全選択状態が崩れるため）。
-  const seg = p.path.split('/');
-  if (seg.length >= 3) state.folderSel.delete(seg.slice(0, 3).join('/'));
-  if (seg.length >= 2) state.monthSel.delete(seg.slice(0, 2).join('/') + '/');
+  clearHeadSelFor(p.path);
   refreshSelectionUi();
 }
+
+// ---------------- drag range selection ----------------
+// 選択モード中に一覧をドラッグすると、矩形に触れた写真をまとめて選択する。
+// 選択内容は「複数選択」モードの個別チェックと同じ state.selected に入るため、
+// ダウンロード・削除・右クリックの一括操作もそのまま使える。
+const dragSel = { active: false, moved: false, x0: 0, y0: 0, x: 0, y: 0, raf: 0, suppressClick: false };
+const dragBox = document.getElementById('drag-select');
+
+function dragRect() {
+  return {
+    left: Math.min(dragSel.x0, dragSel.x), right: Math.max(dragSel.x0, dragSel.x),
+    top: Math.min(dragSel.y0, dragSel.y), bottom: Math.max(dragSel.y0, dragSel.y)
+  };
+}
+
+function drawDragBox() {
+  const r = dragRect();
+  dragBox.style.left = r.left + 'px';
+  dragBox.style.top = r.top + 'px';
+  dragBox.style.width = (r.right - r.left) + 'px';
+  dragBox.style.height = (r.bottom - r.top) + 'px';
+  dragBox.style.display = 'block';
+}
+
+function applyDragSel() {
+  const r = dragRect();
+  const hits = [];
+  document.querySelectorAll('#timeline .cell').forEach(c => {
+    const cr = c.getBoundingClientRect();
+    if (cr.right < r.left || cr.left > r.right || cr.bottom < r.top || cr.top > r.bottom) return;
+    hits.push(c.dataset.path);
+  });
+  if (selectPaths(hits)) refreshSelectionUi();
+}
+
+function scheduleDragApply() {
+  if (dragSel.raf) return;
+  dragSel.raf = requestAnimationFrame(() => {
+    dragSel.raf = 0;
+    drawDragBox();
+    applyDragSel();
+  });
+}
+
+document.getElementById('timeline').addEventListener('mousedown', e => {
+  if (!state.selecting || e.button !== 0) return;
+  // チェックボックス自体のクリックは従来のトグル処理に任せる
+  if (e.target.closest('.sel-box')) return;
+  dragSel.active = true;
+  dragSel.moved = false;
+  dragSel.x0 = dragSel.x = e.clientX;
+  dragSel.y0 = dragSel.y = e.clientY;
+  e.preventDefault(); // 画像のネイティブドラッグ・テキスト選択を防ぐ
+});
+
+window.addEventListener('mousemove', e => {
+  if (!dragSel.active) return;
+  dragSel.x = e.clientX;
+  dragSel.y = e.clientY;
+  // 小さな揺れはクリック扱いにする
+  if (!dragSel.moved) {
+    if (Math.abs(dragSel.x - dragSel.x0) < 5 && Math.abs(dragSel.y - dragSel.y0) < 5) return;
+    dragSel.moved = true;
+  }
+  scheduleDragApply();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!dragSel.active) return;
+  dragSel.active = false;
+  if (dragSel.raf) { cancelAnimationFrame(dragSel.raf); dragSel.raf = 0; }
+  dragBox.style.display = 'none';
+  if (dragSel.moved) {
+    drawDragBox();
+    applyDragSel();
+    dragBox.style.display = 'none';
+    // ドラッグ直後の click で写真がトグルされないように 1 回だけ抑止する。
+    // click が来なかった場合に次クリックを潰さないよう、念のため解除も予約する。
+    dragSel.suppressClick = true;
+    setTimeout(() => { dragSel.suppressClick = false; }, 0);
+    dragSel.moved = false;
+  }
+});
+
+window.addEventListener('click', e => {
+  if (!dragSel.suppressClick) return;
+  dragSel.suppressClick = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
+// ウィンドウ外でボタンを離した場合もドラッグ状態をリセットする
+window.addEventListener('blur', () => {
+  dragSel.active = false;
+  dragSel.moved = false;
+  if (dragSel.raf) { cancelAnimationFrame(dragSel.raf); dragSel.raf = 0; }
+  dragBox.style.display = 'none';
+});
 
 // ---------------- sidebar selection ----------------
 document.getElementById('nav-select').addEventListener('click', () => {
   state.selecting = !state.selecting;
-  if (!state.selecting) { state.selected.clear(); state.folderSel.clear(); state.monthSel.clear(); }
+  if (!state.selecting) {
+    state.selected.clear(); state.folderSel.clear(); state.monthSel.clear();
+    dragSel.active = false;
+    dragBox.style.display = 'none';
+  }
   refreshSelectionUi();
 });
 
