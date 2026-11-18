@@ -4111,6 +4111,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
   <button data-act="rot-l">左回転</button>
   <button data-act="rot-r">右回転</button>
   <button data-act="copy">コピー</button>
+  <button data-act="copy-s">縮小コピー</button>
   <button data-act="edit">編集</button>
   <button data-act="edit-s">縮小編集</button>
   <button data-act="dl">ダウンロード</button>
@@ -4123,6 +4124,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="lb-zoom-label" title="クリックで画面に合わせる">100%</button>
     <button id="lb-zoom-out">縮小</button>
     <button id="lb-copy">コピー</button>
+    <button id="lb-copy-s">縮コピ</button>
     <button id="lb-edit">編集</button>
     <button id="lb-edit-s">縮編</button>
     <button id="lb-del">削除</button>
@@ -5719,6 +5721,9 @@ if (ctxMenu) {
         }
       }
       else if (act === 'copy') await copyCtxPhoto(p);
+      else if (act === 'copy-s') {
+        if (await copyPhotoToClipboardShrunk(p)) alert('縮小コピーしました');
+      }
       else if (act === 'edit') openEditorForPhoto(p);
       else if (act === 'edit-s') openEditorForPhoto(p, true);
       else if (act === 'dl') {
@@ -5927,6 +5932,7 @@ function showLb() {
   document.getElementById('lb-edit').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-edit-s').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-copy').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-copy-s').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-in').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-out').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-label').style.display = p.isVideo ? 'none' : 'block';
@@ -6181,6 +6187,27 @@ function closeEditor(force) {
 document.getElementById('lb-edit').onclick = () => openEditor();
 // 縮編は右クリックメニューの「縮小編集」と同じく、設定された基準・サイズで縮小して編集画面を開く
 document.getElementById('lb-edit-s').onclick = () => openEditor(true);
+// Blob → PNG 変換（maxSide > 0 で長辺を指定pxに縮小。iPhone の巨大画像対策）。
+const toPng = (blob, maxSide) => new Promise((res, rej) => {
+  const img = new Image();
+  img.onload = () => {
+    try {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const m = Math.max(w, h);
+      if (maxSide > 0 && m > maxSide) {
+        const s = maxSide / m;
+        w = Math.round(w * s); h = Math.round(h * s);
+      }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      c.toBlob(b => b ? res(b) : rej(new Error('encode failed')), 'image/png');
+    } catch (e) { rej(e); }
+  };
+  img.onerror = rej;
+  img.src = URL.createObjectURL(blob);
+});
+
 // 元画像をクリップボードへコピーする共通処理（拡大画面の「コピー」と右クリック「コピー」で共用）。
 // 成功時は true、失敗時は alert 表示して false を返す。
 async function copyPhotoToClipboard(p) {
@@ -6189,26 +6216,6 @@ async function copyPhotoToClipboard(p) {
     alert('このブラウザは画像のコピーに対応していません');
     return false;
   }
-  // Blob → PNG 変換（maxSide > 0 で長辺を指定pxに縮小。iPhone の巨大画像対策）
-  const toPng = (blob, maxSide) => new Promise((res, rej) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        let w = img.naturalWidth, h = img.naturalHeight;
-        const m = Math.max(w, h);
-        if (maxSide > 0 && m > maxSide) {
-          const s = maxSide / m;
-          w = Math.round(w * s); h = Math.round(h * s);
-        }
-        const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        c.getContext('2d').drawImage(img, 0, 0, w, h);
-        c.toBlob(b => b ? res(b) : rej(new Error('encode failed')), 'image/png');
-      } catch (e) { rej(e); }
-    };
-    img.onerror = rej;
-    img.src = URL.createObjectURL(blob);
-  });
   const writeBlob = (blob) => navigator.clipboard.write(
     [new ClipboardItem({ [blob.type || 'image/png']: blob })]);
   // iOS Safari は PNG のみ対応のため最初から PNG 化する（長辺2048に縮小）。
@@ -6241,10 +6248,45 @@ async function copyPhotoToClipboard(p) {
     return false;
   }
 }
+// 縮小コピー（右クリックメニューの「縮小コピー」／ビューアの「縮コピ」用）。
+// サーバ側縮小（設定の基準・サイズ。縮小ダウンロードと同じ経路）した画像をクリップボードへ書き込む。
+// 成功時は true、失敗時は alert 表示して false を返す。
+async function copyPhotoToClipboardShrunk(p) {
+  if (!p || p.isVideo) { alert('動画の縮小コピーには対応していません'); return false; }
+  if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+    alert('このブラウザは画像のコピーに対応していません');
+    return false;
+  }
+  const src = (p.original || '').split('?')[0];
+  if (!src.startsWith('/photo/') && !src.startsWith('/editphoto/')) {
+    alert('縮小コピーには対応していません');
+    return false;
+  }
+  try {
+    const r = await fetch(`/api/download-resized?src=${encodeURIComponent(src)}&${shrinkQuery()}`);
+    if (!r.ok) { alert('縮小コピーに失敗しました'); return false; }
+    const blob = await r.blob();
+    // iOS Safari は PNG のみ対応のため PNG に変換して書き込む（縮小済みなので再縮小はしない）。
+    if (/iPad|iPhone|iPod/.test(navigator.userAgent || '')) {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': await toPng(blob, 0) })]);
+    } else {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+    }
+    return true;
+  } catch (err) {
+    alert('縮小コピーに失敗しました');
+    return false;
+  }
+}
 document.getElementById('lb-copy').onclick = async () => {
   const p = state.photos[lbIndex];
   if (!p || p.isVideo) return;
   if (await copyPhotoToClipboard(p)) flashLbTitle('コピーしました');
+};
+document.getElementById('lb-copy-s').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p || p.isVideo) return;
+  if (await copyPhotoToClipboardShrunk(p)) flashLbTitle('縮小コピーしました');
 };
 // 右クリックメニューからのコピー（メイン画面用。成功時はアラートで通知）。
 async function copyCtxPhoto(p) {
