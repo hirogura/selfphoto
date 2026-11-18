@@ -1001,7 +1001,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.7.1"
+    server_version = "selfphoto/2.7.2"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4016,6 +4016,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="lb-del">削除</button>
     <button id="lb-newtab">新タブ</button>
     <button id="lb-dl">DL</button>
+    <button id="lb-dl-s">縮DL</button>
     <button id="lb-prev">←</button>
     <button id="lb-next">→</button>
     <div class="rail-spacer"></div>
@@ -5318,7 +5319,7 @@ async function downloadUrl(url, filename) {
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
 
-// 縮小ダウンロード（右クリックメニュー用）。サーバ側で長辺 1024px に縮小して
+// 縮小ダウンロード（右クリックメニュー／ビューアの「縮DL」用）。サーバ側で長辺 1024px に縮小して
 // からダウンロードする。もともと小さい画像は元ファイルがそのまま返る。
 // 動画や元 URL が想定外の形の場合は通常ダウンロードにフォールバックする。
 async function downloadResized(p) {
@@ -5599,6 +5600,7 @@ function showLb() {
   document.getElementById('lb-zoom-in').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-out').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-label').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-dl-s').style.display = p.isVideo ? 'none' : 'block';
   history.replaceState(null, '', '#p=' + encodeURIComponent(p.path));
 }
 // ---------------- viewer zoom ----------------
@@ -5696,6 +5698,12 @@ document.getElementById('lb-dl').onclick = async () => {
   const p = state.photos[lbIndex];
   if (!p) return;
   await downloadUrl(p.original, p.filename);
+};
+// 縮DLは右クリックメニューの「縮小ダウンロード」と同じく長辺 1024px でダウンロード
+document.getElementById('lb-dl-s').onclick = async () => {
+  const p = state.photos[lbIndex];
+  if (!p) return;
+  await downloadResized(p);
 };
 document.getElementById('lb-newtab').onclick = (e) => {
   e.stopPropagation();
