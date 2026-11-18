@@ -1032,7 +1032,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.9.0"
+    server_version = "selfphoto/2.9.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -3673,6 +3673,8 @@ main { padding: 0 8px 80px 228px; }
 .cell img {
   width: 100%; height: 100%; object-fit: cover; display: block;
   opacity: 0; transition: opacity .25s;
+  /* ドラッグ範囲選択のため画像のネイティブドラッグ・テキスト選択を止める */
+  -webkit-user-drag: none; user-select: none;
 }
 .cell img.loaded { opacity: 1; }
 .cell .badge {
@@ -3913,9 +3915,7 @@ main { padding: 0 8px 80px 228px; }
 body.selecting .cell .sel-box { display: flex; }
 .cell.selected .sel-box { background: var(--accent); border-color: var(--accent); }
 .cell.selected img { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* 選択モード中は画像のネイティブドラッグを止め、範囲選択を優先する */
-body.selecting .cell img { -webkit-user-drag: none; user-select: none; }
-/* ドラッグ範囲選択の枠（選択モード中のみ表示） */
+/* ドラッグ範囲選択の枠 */
 #drag-select {
   position: fixed; z-index: 25; display: none; pointer-events: none;
   border: 1px solid var(--accent); background: rgba(76,141,255,.15);
@@ -5086,6 +5086,7 @@ function makeCell(p) {
   c.style.aspectRatio = ratio;
   const img = document.createElement('img');
   img.loading = 'lazy';
+  img.draggable = false; // ドラッグ範囲選択が画像のネイティブドラッグに邪魔されないように
   img.dataset.src = p.thumb || p.original;
   img.alt = p.filename;
   img.addEventListener('click', () => {
@@ -5182,14 +5183,15 @@ function scheduleDragApply() {
 }
 
 document.getElementById('timeline').addEventListener('mousedown', e => {
-  if (!state.selecting || e.button !== 0) return;
+  if (e.button !== 0) return;
   // チェックボックス自体のクリックは従来のトグル処理に任せる
   if (e.target.closest('.sel-box')) return;
   dragSel.active = true;
   dragSel.moved = false;
   dragSel.x0 = dragSel.x = e.clientX;
   dragSel.y0 = dragSel.y = e.clientY;
-  e.preventDefault(); // 画像のネイティブドラッグ・テキスト選択を防ぐ
+  // ここで preventDefault すると通常モードのクリック（ビューア起動）が
+  // 止まるブラウザがあるため、画像ドラッグ止めは CSS 側で行う。
 });
 
 window.addEventListener('mousemove', e => {
@@ -5200,6 +5202,12 @@ window.addEventListener('mousemove', e => {
   if (!dragSel.moved) {
     if (Math.abs(dragSel.x - dragSel.x0) < 5 && Math.abs(dragSel.y - dragSel.y0) < 5) return;
     dragSel.moved = true;
+    // 通常モードからのドラッグも、ここで選択モードに切り替えて範囲選択する。
+    // クリックだけならビューアが開くよう、判定はドラッグ確定後に行う。
+    if (!state.selecting) {
+      state.selecting = true;
+      refreshSelectionUi();
+    }
   }
   scheduleDragApply();
 });
