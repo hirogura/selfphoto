@@ -6262,18 +6262,21 @@ async function copyPhotoToClipboardShrunk(p) {
     alert('縮小コピーには対応していません');
     return false;
   }
-  try {
+  // サーバ側で設定の基準・サイズに縮小した画像を、クリップボードで確実に扱える
+  // image/png へ再エンコードして書き込む。Chrome は image/jpeg / image/webp の
+  // 書き込みに対応せず、iOS Safari は PNG のみ対応のため。
+  // Promise を渡すのは iOS Safari でユーザージェスチャを維持するため（他ブラウザでも可）。
+  const pngP = (async () => {
     const r = await fetch(`/api/download-resized?src=${encodeURIComponent(src)}&${shrinkQuery()}`);
-    if (!r.ok) { alert('縮小コピーに失敗しました'); return false; }
-    const blob = await r.blob();
-    // iOS Safari は PNG のみ対応のため PNG に変換して書き込む（縮小済みなので再縮小はしない）。
-    if (/iPad|iPhone|iPod/.test(navigator.userAgent || '')) {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': await toPng(blob, 0) })]);
-    } else {
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
-    }
+    if (!r.ok) throw new Error(`resize failed: ${r.status}`);
+    // 縮小済みなので maxSide=0（再縮小なし）で PNG に変換するだけ。
+    return toPng(await r.blob(), 0);
+  })();
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngP })]);
     return true;
   } catch (err) {
+    console.error('縮小コピーに失敗しました:', err);
     alert('縮小コピーに失敗しました');
     return false;
   }
