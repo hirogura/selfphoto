@@ -1001,7 +1001,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.7.0"
+    server_version = "selfphoto/2.7.1"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4012,6 +4012,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
     <button id="lb-zoom-out">縮小</button>
     <button id="lb-copy">コピー</button>
     <button id="lb-edit">編集</button>
+    <button id="lb-edit-s">縮編</button>
     <button id="lb-del">削除</button>
     <button id="lb-newtab">新タブ</button>
     <button id="lb-dl">DL</button>
@@ -5593,6 +5594,7 @@ function showLb() {
   document.getElementById('lb-title').textContent =
     `${p.filename}　${p.camera || ''} ${p.width||''}×${p.height||''}`;
   document.getElementById('lb-edit').style.display = p.isVideo ? 'none' : 'block';
+  document.getElementById('lb-edit-s').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-copy').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-in').style.display = p.isVideo ? 'none' : 'block';
   document.getElementById('lb-zoom-out').style.display = p.isVideo ? 'none' : 'block';
@@ -5818,7 +5820,7 @@ function openEditor(shrinkMax) {
     syncBodyScroll();
   };
   img.onerror = () => alert('画像を読み込めませんでした');
-  // 縮小編集（右クリックメニューの「縮小編集」）: 長辺 1024px に縮小した画像を
+  // 縮小編集（右クリックの「縮小編集」／ビューア左レールの「縮編」）: 長辺 1024px に縮小した画像を
   // 編集対象にする。すでに 1024px 以下ならサーバ側で元画像がそのまま返る。
   // 保存は ed.path（元写真）に対して行われるため、上書き保存で縮小結果が残る。
   let loadSrc = p.original;
@@ -5838,6 +5840,8 @@ function closeEditor(force) {
   ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
+// 縮編は右クリックメニューの「縮小編集」と同じく、長辺 1024px に縮小して編集画面を開く
+document.getElementById('lb-edit-s').onclick = () => openEditor(1024);
 // 元画像をクリップボードへコピーする共通処理（拡大画面の「コピー」と右クリック「コピー」で共用）。
 // 成功時は true、失敗時は alert 表示して false を返す。
 async function copyPhotoToClipboard(p) {
