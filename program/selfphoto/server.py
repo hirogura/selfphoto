@@ -59,6 +59,37 @@ _SCAN_STATE: dict = {"running": False, "last": None, "progress": None}
 
 
 # ------------------------------------------------------------------
+# 縮小設定: 縮小編集・縮小ダウンロードで使う基準（長辺／横／縦）とサイズ。
+# 縦横比は常に維持し、指定より小さい画像は拡大しない。
+# ------------------------------------------------------------------
+SHRINK_CFG_FILE = common.DATA_DIR / "shrink_config.json"
+SHRINK_MODES = ("long", "width", "height")
+SHRINK_SIZES = (2048, 1024, 800, 320)
+DEFAULT_SHRINK_CONFIG = {"mode": "long", "size": 1024}
+
+
+def load_shrink_config() -> dict:
+    cfg = dict(DEFAULT_SHRINK_CONFIG)
+    try:
+        data = json.loads(SHRINK_CFG_FILE.read_text())
+        if isinstance(data, dict):
+            if data.get("mode") in SHRINK_MODES:
+                cfg["mode"] = data["mode"]
+            if isinstance(data.get("size"), int) and data["size"] in SHRINK_SIZES:
+                cfg["size"] = data["size"]
+    except Exception:
+        pass
+    return cfg
+
+
+def save_shrink_config(cfg: dict) -> None:
+    SHRINK_CFG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SHRINK_CFG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    os.replace(tmp, SHRINK_CFG_FILE)
+
+
+# ------------------------------------------------------------------
 # sync: 別PCの selfphoto と1日1回・片方向で同期する（予備機用途・同期先は1箇所のみ）。
 # 写真ライブラリは大容量のため、増分同期のみ行う。データの流れは常に
 # 同期元→同期先の pull（同期先が取得しにいく）で、push は行わない。
@@ -1001,7 +1032,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.7.2"
+    server_version = "selfphoto/2.8.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -1134,6 +1165,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_scan()
             elif path == "/api/sync/config":
                 self.api_sync_config_save()
+            elif path == "/api/shrink-config":
+                self.api_shrink_config_save()
             elif path == "/api/sync/role":
                 self.api_sync_role()
             elif path == "/api/sync/files":
@@ -1256,6 +1289,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_edits()
         elif path == "/api/backup-config":
             self.api_backup_config()
+        elif path == "/api/shrink-config":
+            self.send_json(load_shrink_config())
         elif path == "/api/backup-status":
             self.api_backup_status()
         elif path == "/api/import-status":
@@ -1758,22 +1793,26 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def api_download_resized(self, query: str) -> None:
-        """元画像を長辺 max ピクセルに縮小してダウンロードさせる（縮小ダウンロード用）。
+        """元画像を縮小してダウンロード／編集用に返す（縦横比は維持）。
 
-        GET /api/download-resized?src=/photo/2026/202609/IMG_0001.jpg&max=1024
-        src は /photo/<相対パス> または /editphoto/<名前>。すでに長辺が
-        max 以下の画像は元ファイルをそのまま返す。
+        GET /api/download-resized?src=/photo/2026/202609/IMG_0001.jpg&mode=long&size=1024
+        mode は long（長辺）/ width（横）/ height（縦）。旧形式の max=<px> も
+        長辺指定として受け付ける。src は /photo/<相対パス> または
+        /editphoto/<名前>。拡大はせず、指定値より小さい画像は元ファイルを返す。
         """
         from urllib.parse import parse_qs
         import io
 
         q = parse_qs(query)
         src = (q.get("src", [""])[0] or "").strip()
+        mode = (q.get("mode", ["long"])[0] or "long")
+        if mode not in SHRINK_MODES:
+            mode = "long"
         try:
-            max_side = int(q.get("max", ["1024"])[0])
-        except ValueError:
-            max_side = 1024
-        max_side = max(16, min(8192, max_side))
+            size = int(q.get("size", q.get("max", ["1024"]))[0])
+        except (TypeError, ValueError):
+            size = 1024
+        size = max(16, min(8192, size))
         orig = None
         if src.startswith("/editphoto/"):
             name = unquote(src[len("/editphoto/"):]).split("?")[0]
@@ -1805,11 +1844,16 @@ class Handler(BaseHTTPRequestHandler):
                 if disp is None:
                     disp = im
                 w, h = disp.size
-                if max(w, h) <= max_side:
+                if not w or not h:
                     self.send_file(orig, download_name=orig.name)
                     return
-                scale = max_side / max(w, h)
-                onw, onh = int(round(w * scale)), int(round(h * scale))
+                base = max(w, h) if mode == "long" else (w if mode == "width" else h)
+                scale = size / base
+                if scale >= 1:
+                    # 拡大はしない（指定より小さい画像は元のまま）
+                    self.send_file(orig, download_name=orig.name)
+                    return
+                onw, onh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
                 # 縮小は表示向きの実ピクセルに対してかける
                 resized = disp.resize((onw, onh), Image.LANCZOS)
                 suffix = orig.suffix.lower()
@@ -2754,6 +2798,35 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def api_shrink_config_save(self) -> None:
+        """縮小設定（基準とサイズ）を保存する。"""
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        cfg = load_shrink_config()
+        if "mode" in body:
+            if body["mode"] not in SHRINK_MODES:
+                self.send_json({"error": "invalid mode"}, 400)
+                return
+            cfg["mode"] = body["mode"]
+        if "size" in body:
+            try:
+                size = int(body["size"])
+            except (TypeError, ValueError):
+                self.send_json({"error": "invalid size"}, 400)
+                return
+            if size not in SHRINK_SIZES:
+                self.send_json({"error": "invalid size"}, 400)
+                return
+            cfg["size"] = size
+        try:
+            save_shrink_config(cfg)
+        except OSError as e:
+            self.send_json({"error": f"save failed: {e}"}, 500)
+            return
+        self.send_json({"ok": True, **cfg})
+
     def api_backup_config(self) -> None:
         """バックアップ設定を返す（パスワードはマスク）。"""
         from . import backup
@@ -3462,6 +3535,36 @@ body.modal-open { overflow: hidden; }
 .sync-actions button:hover { border-color: var(--accent); }
 .sync-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .sync-actions button:disabled { opacity: .5; cursor: wait; }
+/* ---------------- settings modal ---------------- */
+#settings-ov {
+  position: fixed; inset: 0; z-index: 210; display: none;
+  background: rgba(0,0,0,.72); align-items: center; justify-content: center;
+}
+#settings-ov.on { display: flex; }
+#settings-ov .set-box {
+  background: var(--card); border: 1px solid var(--line); color: var(--fg);
+  padding: 20px 22px; border-radius: 12px; width: min(520px, calc(100vw - 40px));
+  max-height: calc(100vh - 60px); overflow-y: auto;
+}
+#settings-ov h3 { margin: 0 0 4px; font-size: 15px; }
+.set-hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; line-height: 1.6; }
+.set-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.set-row label { font-size: 13px; font-weight: 700; min-width: 70px; }
+.set-row select {
+  flex: 1; min-width: 160px; padding: 8px 10px; font-size: 13px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; outline: none;
+}
+.set-row select:focus { border-color: var(--accent); }
+#set-status {
+  font-size: 12px; color: var(--muted); min-height: 18px; margin-bottom: 12px;
+}
+.set-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.set-actions button {
+  padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  background: var(--chip); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+}
+.set-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.set-actions button:disabled { opacity: .5; cursor: wait; }
 #sidebar nav { display: flex; flex-direction: column; gap: 2px; }
 #sidebar nav button {
   display: flex; align-items: center; gap: 10px;
@@ -3962,6 +4065,7 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <progress id="import-prog" max="100" value="0" style="display:none"></progress>
     </div>
     <button id="nav-select"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg></span><span class="lbl">複数選択</span></button>
+    <button id="nav-settings"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.56V21a2 2 0 11-4 0v-.08a1.7 1.7 0 00-1.1-1.55 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.56-1H3a2 2 0 110-4h.08A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.56V3a2 2 0 114 0v.08a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9v.01a1.7 1.7 0 001.56 1H21a2 2 0 110 4h-.08a1.7 1.7 0 00-1.52 1z"/></svg></span><span class="lbl">設定</span></button>
     <button id="nav-download"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">ダウンロード</span></button>
     <button id="nav-delete"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg></span><span class="lbl">削除</span></button>
     <button id="nav-upload"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M6.5 9.5L12 4l5.5 5.5"/><path d="M4 20h16"/></svg></span><span class="lbl">アップロード</span></button>
@@ -4176,6 +4280,34 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       <button id="btn-sync-now" class="primary">⚡ 今すぐ同期</button>
       <button id="btn-sync-close">閉じる</button>
       <button id="btn-sync-stop">同期を停止</button>
+    </div>
+  </div>
+</div>
+<div id="settings-ov">
+  <div class="set-box">
+    <h3>⚙️ 設定</h3>
+    <div class="set-hint">縮小設定: 縮小編集・縮小ダウンロードで使うサイズです。縦横比は維持し、指定より小さい画像は拡大しません。</div>
+    <div class="set-row">
+      <label for="set-shrink-mode">基準</label>
+      <select id="set-shrink-mode">
+        <option value="long">長辺</option>
+        <option value="width">横</option>
+        <option value="height">縦</option>
+      </select>
+    </div>
+    <div class="set-row">
+      <label for="set-shrink-size">サイズ</label>
+      <select id="set-shrink-size">
+        <option value="2048">2048</option>
+        <option value="1024">1024</option>
+        <option value="800">800</option>
+        <option value="320">320</option>
+      </select>
+    </div>
+    <div id="set-status"></div>
+    <div class="set-actions">
+      <button id="btn-set-save" class="primary">保存</button>
+      <button id="btn-set-close">閉じる</button>
     </div>
   </div>
 </div>
@@ -5319,8 +5451,73 @@ async function downloadUrl(url, filename) {
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
 
-// 縮小ダウンロード（右クリックメニュー／ビューアの「縮DL」用）。サーバ側で長辺 1024px に縮小して
-// からダウンロードする。もともと小さい画像は元ファイルがそのまま返る。
+// ---------------- 縮小設定 ----------------
+// 縮小編集・縮小ダウンロード共通の基準（長辺／横／縦）とサイズ。
+// サーバ側の shrink_config.json に保存し、起動時に読み込む。
+let shrinkCfg = { mode: 'long', size: 1024 };
+function shrinkQuery() {
+  return `mode=${encodeURIComponent(shrinkCfg.mode)}&size=${shrinkCfg.size}`;
+}
+function applyShrinkForm() {
+  document.getElementById('set-shrink-mode').value = shrinkCfg.mode;
+  document.getElementById('set-shrink-size').value = String(shrinkCfg.size);
+}
+async function loadShrinkConfig() {
+  try {
+    const c = await (await fetch('/api/shrink-config')).json();
+    if (c && !c.error && ['long', 'width', 'height'].includes(c.mode)
+        && [2048, 1024, 800, 320].includes(c.size)) {
+      shrinkCfg = { mode: c.mode, size: c.size };
+    }
+  } catch (e) {}
+  applyShrinkForm();
+}
+function openSettingsModal() {
+  document.getElementById('settings-ov').classList.add('on');
+  document.getElementById('set-status').textContent = '';
+  loadShrinkConfig();
+}
+function closeSettingsModal() {
+  document.getElementById('settings-ov').classList.remove('on');
+}
+document.getElementById('nav-settings').onclick = openSettingsModal;
+document.getElementById('btn-set-close').onclick = closeSettingsModal;
+document.getElementById('settings-ov').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeSettingsModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSettingsModal();
+});
+document.getElementById('btn-set-save').onclick = async () => {
+  const btn = document.getElementById('btn-set-save');
+  const mode = document.getElementById('set-shrink-mode').value;
+  const size = parseInt(document.getElementById('set-shrink-size').value, 10);
+  if (!['long', 'width', 'height'].includes(mode) || ![2048, 1024, 800, 320].includes(size)) {
+    document.getElementById('set-status').textContent = '設定値が不正です';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/shrink-config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode, size})
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) {
+      document.getElementById('set-status').textContent = d.error || '保存に失敗しました';
+      return;
+    }
+    shrinkCfg = { mode: d.mode, size: d.size };
+    document.getElementById('set-status').textContent = '保存しました';
+  } catch (e) {
+    document.getElementById('set-status').textContent = '保存に失敗しました（通信エラー）';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// 縮小ダウンロード（右クリックメニュー／ビューアの「縮DL」用）。設定された基準・サイズで
+// サーバ側から縮小した画像をダウンロードする。もともと小さい画像は元ファイルがそのまま返る。
 // 動画や元 URL が想定外の形の場合は通常ダウンロードにフォールバックする。
 async function downloadResized(p) {
   const src = (p.original || '').split('?')[0];
@@ -5328,7 +5525,7 @@ async function downloadResized(p) {
     await downloadUrl(p.original, p.filename);
     return;
   }
-  await downloadUrl(`/api/download-resized?src=${encodeURIComponent(src)}&max=1024`);
+  await downloadUrl(`/api/download-resized?src=${encodeURIComponent(src)}&${shrinkQuery()}`);
 }
 
 // ---------------- thumbnail context menu ----------------
@@ -5390,7 +5587,7 @@ if (ctxMenu) {
       }
       else if (act === 'copy') await copyCtxPhoto(p);
       else if (act === 'edit') openEditorForPhoto(p);
-      else if (act === 'edit-s') openEditorForPhoto(p, 1024);
+      else if (act === 'edit-s') openEditorForPhoto(p, true);
       else if (act === 'dl') {
         // 1 枚だけなら従来どおりその写真のみ、複数選択時はサイドバーと同じ一括ダウンロード
         if (targets.length > 1) await downloadPhotos(targets);
@@ -5459,13 +5656,13 @@ async function rotateThumbPhotos(list, dir) {
   if (failed.length) notes.push(`回転に失敗しました（${failed.length} 件）: ${failed.join(', ')}`);
   if (notes.length) alert(notes.join('\n'));
 }
-function openEditorForPhoto(p, shrinkMax) {
+function openEditorForPhoto(p, shrink) {
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
   const idx = state.photos.findIndex(x => x.path === p.path);
   if (idx < 0) return;
   lbIndex = idx;
   showLb();
-  openEditor(shrinkMax);
+  openEditor(shrink);
 }
 
 const nowViewing = document.getElementById('now-viewing');
@@ -5801,7 +5998,7 @@ edCompareChk.onchange = () => {
   document.getElementById('editor').classList.toggle('comparing', on);
 };
 
-function openEditor(shrinkMax) {
+function openEditor(shrink) {
   const p = state.photos[lbIndex];
   if (!p) return;
   if (p.isVideo) { alert('動画の編集には対応していません'); return; }
@@ -5828,14 +6025,15 @@ function openEditor(shrinkMax) {
     syncBodyScroll();
   };
   img.onerror = () => alert('画像を読み込めませんでした');
-  // 縮小編集（右クリックの「縮小編集」／ビューア左レールの「縮編」）: 長辺 1024px に縮小した画像を
-  // 編集対象にする。すでに 1024px 以下ならサーバ側で元画像がそのまま返る。
+  // 縮小編集（右クリックの「縮小編集」／ビューア左レールの「縮編」）: 設定された
+  // 基準・サイズで縮小した画像を編集対象にする。縦横比は維持し、指定より小さい
+  // 画像はサーバ側で元画像がそのまま返る。
   // 保存は ed.path（元写真）に対して行われるため、上書き保存で縮小結果が残る。
   let loadSrc = p.original;
-  if (shrinkMax) {
+  if (shrink) {
     const base = loadSrc.split('?')[0];
     if (base.startsWith('/photo/') || base.startsWith('/editphoto/')) {
-      loadSrc = `/api/download-resized?src=${encodeURIComponent(base)}&max=${shrinkMax}`;
+      loadSrc = `/api/download-resized?src=${encodeURIComponent(base)}&${shrinkQuery()}`;
     }
   }
   img.src = loadSrc + (loadSrc.includes('?') ? '&' : '?') + 't=' + Date.now();
@@ -5848,8 +6046,8 @@ function closeEditor(force) {
   ed.adjustBaseData = null;
 }
 document.getElementById('lb-edit').onclick = () => openEditor();
-// 縮編は右クリックメニューの「縮小編集」と同じく、長辺 1024px に縮小して編集画面を開く
-document.getElementById('lb-edit-s').onclick = () => openEditor(1024);
+// 縮編は右クリックメニューの「縮小編集」と同じく、設定された基準・サイズで縮小して編集画面を開く
+document.getElementById('lb-edit-s').onclick = () => openEditor(true);
 // 元画像をクリップボードへコピーする共通処理（拡大画面の「コピー」と右クリック「コピー」で共用）。
 // 成功時は true、失敗時は alert 表示して false を返す。
 async function copyPhotoToClipboard(p) {
@@ -7539,6 +7737,7 @@ document.getElementById('btn-sync-stop').onclick = async () => {
 
 loadMonths();
 loadPhotos();
+loadShrinkConfig();
 refreshSidebarBackup();
 refreshSidebarSync();
 setInterval(() => { refreshSidebarBackup(); refreshSidebarSync(); }, 15000);
