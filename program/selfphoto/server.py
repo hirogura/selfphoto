@@ -1001,7 +1001,7 @@ def stream_multipart(reader: "_BodyReader", boundary: bytes):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "selfphoto/2.6.0"
+    server_version = "selfphoto/2.7.0"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # 静かにする
@@ -4078,6 +4078,11 @@ body.selecting .month-head .sel-box, body.selecting .day-head .sel-box { display
       </div>
       <button id="ed-faceblur">顔ぼかし</button>
       <button id="ed-bgblur">背景ぼかし</button>
+      <button data-tool="brightness">明るさ</button>
+      <div class="ed-panel" id="ed-panel-brightness">
+        <div class="ed-hint">画像全体の明るさを調整（右で明るく）</div>
+        <label>明るさ <input type="range" id="ed-adj-brightness" data-adjust="brightness" min="-100" max="100" step="1" value="0"><span id="ed-adj-brightness-v">0</span></label>
+      </div>
       <button data-tool="shadow">シャドウ</button>
       <div class="ed-panel" id="ed-panel-shadow">
         <div class="ed-hint">暗い部分だけ調整（右で明るく）</div>
@@ -6109,13 +6114,13 @@ document.querySelectorAll('#editor .ed-side > button[data-tool]').forEach(b => {
 window.addEventListener('resize', updateBrushCursor);
 
 // ---------------- tone adjust ----------------
-// シャドウ / ハイライト / コントラスト / 彩度 / 色温度 / 色合いの
+// 明るさ / シャドウ / ハイライト / コントラスト / 彩度 / 色温度 / 色合いの
 // スライダー調整（-100〜+100、中央 0）。スライダーを動かすと
 // 調整前のキャンバスを基準スナップショットに保持し、そこから全項目を
 // かけ直してリアルタイムに反映する（連続ドラッグ中は rAF で間引き）。
 // 回転・切抜き・リサイズ・筆操作・1つ戻す・ツール切替で基準は破棄され、
 // スライダーは 0 に戻る。保存時には表示中の内容がそのまま使われる。
-const ED_ADJUST_TOOLS = ['shadow', 'highlight', 'contrast', 'saturation', 'colortemp', 'tint'];
+const ED_ADJUST_TOOLS = ['brightness', 'shadow', 'highlight', 'contrast', 'saturation', 'colortemp', 'tint'];
 function edAdjustReset() {
   ed.adjustBaseData = null;
   if (!ed.adjust) ed.adjust = {};
@@ -6150,9 +6155,13 @@ function applyAdjustments() {
   applyAdjustPixels(out.data, ed.adjust || {});
   edCtx.putImageData(out, 0, 0);
 }
-function buildEdToneLut(shadow, highlight) {
+// 明るさはガンマ補正としてトーンカーブに畳み込む（右=ガンマ小=明るく）。
+// シャドウ／ハイライトのカーブをかけた後に適用するため、相乗りでも破綻しない。
+function buildEdToneLut(shadow, highlight, brightness) {
   const sh = Math.max(-1, Math.min(1, shadow));
   const hi = Math.max(-1, Math.min(1, highlight));
+  const br = Math.max(-1, Math.min(1, brightness || 0));
+  const gamma = Math.pow(2, -br);
   const lut = new Float64Array(1025);
   for (let i = 0; i < lut.length; i++) {
     const y = i / (lut.length - 1);
@@ -6160,14 +6169,16 @@ function buildEdToneLut(shadow, highlight) {
     const x = dark ? 2 * y : 2 * (1 - y);
     const amount = dark ? -2 * sh : 2 * hi;
     const mapped = x / (x + (1 - x) * Math.exp(amount * (1 - x)));
-    lut[i] = (dark ? mapped / 2 : 1 - mapped / 2) * 255;
+    const v = dark ? mapped / 2 : 1 - mapped / 2;
+    lut[i] = Math.pow(v, gamma) * 255;
   }
   return lut;
 }
 function applyAdjustPixels(d, a) {
   const sh = ((a.shadow || 0)) / 100;
   const hi = ((a.highlight || 0)) / 100;
-  const toneLUT = sh !== 0 || hi !== 0 ? buildEdToneLut(sh, hi) : null;
+  const br = ((a.brightness || 0)) / 100;
+  const toneLUT = sh !== 0 || hi !== 0 || br !== 0 ? buildEdToneLut(sh, hi, br) : null;
   const st = ((a.saturation || 0)) / 100;
   const tp = ((a.colortemp || 0)) / 100;
   const tn = ((a.tint || 0)) / 100;
